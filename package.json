@@ -22,6 +22,7 @@
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src test",
+    "prepare": "tsc",
     "prepublishOnly": "pnpm run build && pnpm run test"
   },
   "dependencies": {
