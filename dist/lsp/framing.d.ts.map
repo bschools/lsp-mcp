@@ -1,1 +1,0 @@
-{"version":3,"file":"framing.d.ts","sourceRoot":"","sources":["../../src/lsp/framing.ts"],"names":[],"mappings":"AAEA,wBAAgB,aAAa,CAAC,OAAO,EAAE,OAAO,GAAG,MAAM,CAKtD;AAED,qBAAa,WAAW;IACtB,OAAO,CAAC,MAAM,CAAmB;IAEjC,IAAI,CAAC,KAAK,EAAE,MAAM,GAAG,OAAO,EAAE;CA6B/B"}

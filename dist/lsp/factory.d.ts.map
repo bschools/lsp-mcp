@@ -1,1 +1,0 @@
-{"version":3,"file":"factory.d.ts","sourceRoot":"","sources":["../../src/lsp/factory.ts"],"names":[],"mappings":"AAAA,OAAO,EAAE,YAAY,EAAsB,MAAM,gBAAgB,CAAC;AAelE,wBAAsB,iBAAiB,CAAC,aAAa,EAAE,MAAM,GAAG,OAAO,CAAC,YAAY,CAAC,CAepF;AAED,wBAAsB,WAAW,CAAC,aAAa,EAAE,MAAM,GAAG,OAAO,CAAC,IAAI,CAAC,CAOtE"}
