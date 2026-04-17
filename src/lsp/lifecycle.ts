@@ -55,6 +55,10 @@ export async function createLspLifecycle(
 
   client.notify("initialized", {});
 
+  // Eagerly open all .ts/.tsx files in the workspace so tsserver indexes
+  // cross-file references before the first rename/references call.
+  await warmUpWorkspace(workspaceRoot, (p) => didOpen(p));
+
   async function didOpen(filePath: string): Promise<void> {
     const fileUri = url.pathToFileURL(filePath).href;
     const stat = fs.statSync(filePath);
@@ -129,4 +133,45 @@ export async function createLspLifecycle(
   }
 
   return { client, shutdown, didOpen, didChange, didClose, ensureFile };
+}
+
+const WARMUP_EXTENSIONS = new Set([".ts", ".tsx", ".mts", ".cts"]);
+const WARMUP_SKIP_DIRS = new Set(["node_modules", "dist", ".git", "build", "out"]);
+const WARMUP_MAX_FILES = 500;
+
+async function warmUpWorkspace(
+  root: string,
+  open: (p: string) => Promise<void>,
+): Promise<void> {
+  const files: string[] = [];
+  const queue: string[] = [root];
+
+  while (queue.length > 0 && files.length < WARMUP_MAX_FILES) {
+    const dir = queue.shift()!;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        if (WARMUP_SKIP_DIRS.has(entry.name) || entry.name.startsWith(".")) continue;
+        queue.push(path.join(dir, entry.name));
+      } else if (entry.isFile()) {
+        if (WARMUP_EXTENSIONS.has(path.extname(entry.name))) {
+          files.push(path.join(dir, entry.name));
+          if (files.length >= WARMUP_MAX_FILES) break;
+        }
+      }
+    }
+  }
+
+  for (const file of files) {
+    try {
+      await open(file);
+    } catch {
+      // Best-effort — skip unreadable files
+    }
+  }
 }
