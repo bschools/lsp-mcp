@@ -1,4 +1,4 @@
-# @benmar/lsp-mcp
+# lsp-mcp
 
 An MCP server that exposes LSP refactoring operations as Claude Code tools.
 
