@@ -50,13 +50,28 @@ async function renameFile(input: {
     files: [{ oldUri, newUri }],
   });
 
-  // Verify — search for old module specifiers
+  // Verify — word-boundary match catches identifier usages (e.g. re-exports)
   const oldBaseNoExt = path.basename(oldPath, path.extname(oldPath));
-  const lingering = findLingeringReferences({
+  const wordBoundaryRefs = findLingeringReferences({
     workspaceRoot,
     oldName: oldBaseNoExt,
     excludePaths: changed,
   });
+
+  // Specifier-aware match catches quoted import paths:
+  // "./user.service", "../path/user.service", "user.service" (no extension)
+  const escapedBase = oldBaseNoExt.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const specifierPattern = new RegExp(
+    `["'](\\.\\.?/[^'"]*|)${escapedBase}(?:\\.[tj]sx?)?["']`,
+  );
+  const specifierRefs = findLingeringReferences({
+    workspaceRoot,
+    oldName: oldBaseNoExt,
+    excludePaths: changed,
+    patternOverride: specifierPattern,
+  });
+
+  const lingering = [...new Set([...wordBoundaryRefs, ...specifierRefs])];
 
   return { ok: true, filesChanged: changed, lingeringReferences: lingering };
 }
