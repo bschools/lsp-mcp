@@ -37,16 +37,99 @@ interface RenameCase {
   newName: string;
 }
 
-// Seed corpus — expand with historical PersonaMind rename targets.
-// For initial Phase 4 gate, we reuse the fixture's UserService case.
-// In practice, capture 10-20 targets before publish.
+// PersonaMind rename targets — class, method, type alias, and function mix.
+// At least two entries have spec-file consumers (UserService, AuthService).
 const CORPUS: RenameCase[] = [
+  // --- user.service.ts (has spec + consumer) ---
   {
     name: "UserService class rename",
     file: "src/user.service.ts",
     line: 0,
     column: 13,
     newName: "AccountService",
+  },
+  {
+    name: "getName method rename",
+    file: "src/user.service.ts",
+    line: 1,
+    column: 2,
+    newName: "getDisplayName",
+  },
+  // --- consumer.ts ---
+  {
+    name: "makeService function rename",
+    file: "src/consumer.ts",
+    line: 2,
+    column: 16,
+    newName: "createService",
+  },
+  // --- auth.service.ts (has spec) ---
+  {
+    name: "IAuthProvider type alias rename",
+    file: "src/auth.service.ts",
+    line: 0,
+    column: 12,
+    newName: "ITokenValidator",
+  },
+  {
+    name: "AuthService class rename",
+    file: "src/auth.service.ts",
+    line: 4,
+    column: 13,
+    newName: "TokenAuthService",
+  },
+  {
+    name: "authenticate method rename",
+    file: "src/auth.service.ts",
+    line: 5,
+    column: 2,
+    newName: "verify",
+  },
+  {
+    name: "logout method rename",
+    file: "src/auth.service.ts",
+    line: 9,
+    column: 2,
+    newName: "signOut",
+  },
+  // --- interfaces.ts ---
+  {
+    name: "IUserRepository type alias rename",
+    file: "src/interfaces.ts",
+    line: 0,
+    column: 12,
+    newName: "IUserStore",
+  },
+  // --- base.repository.ts ---
+  {
+    name: "BaseRepository class rename",
+    file: "src/base.repository.ts",
+    line: 2,
+    column: 22,
+    newName: "AbstractRepository",
+  },
+  {
+    name: "findByIds method rename",
+    file: "src/base.repository.ts",
+    line: 6,
+    column: 2,
+    newName: "findManyByIds",
+  },
+  // --- user.repository.ts ---
+  {
+    name: "UserRepository class rename",
+    file: "src/user.repository.ts",
+    line: 2,
+    column: 13,
+    newName: "UserDataRepository",
+  },
+  // --- user-utils.ts ---
+  {
+    name: "formatUserName function rename",
+    file: "src/user-utils.ts",
+    line: 2,
+    column: 16,
+    newName: "formatDisplayName",
   },
 ];
 
@@ -172,5 +255,14 @@ describe.skipIf(shouldSkip)("Phase 4 regression corpus", () => {
     for (const ref of oldResult.lingeringReferences) {
       expect(newResult.lingeringReferences).toContain(ref);
     }
+  }, 60000);
+});
+
+// Sanity smoke — runs without OLD_LSP_MCP; guards against bad line/col in corpus.
+const newServerExists = fs.existsSync(NEW_LSP_MCP);
+describe.skipIf(!newServerExists)("corpus sanity (new server only)", () => {
+  it.each(CORPUS)("new server ok: $name", async (c) => {
+    const result = await runRename(NEW_LSP_MCP, c);
+    expect(result.ok).toBe(true);
   }, 60000);
 });
