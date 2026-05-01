@@ -16,20 +16,31 @@ interface CodeAction {
   title: string;
   kind?: string;
   edit?: WorkspaceEdit;
+  data?: unknown;
 }
 
-async function moveFunction(input: {
+type MoveFunctionInput = {
   filePath: string;
   line: number;
   column: number;
   destinationFile: string;
-}): Promise<{ ok: boolean; filesChanged: string[]; code?: string }> {
-  const { filePath, line, column } = input;
+};
+
+type MoveFunctionResult = {
+  ok: boolean;
+  filesChanged: string[];
+  code?: string;
+  hint?: string;
+};
+
+async function moveFunction(input: MoveFunctionInput): Promise<MoveFunctionResult> {
+  const { filePath, line, column, destinationFile } = input;
   const workspaceRoot = detectWorkspaceRoot(filePath);
   const lifecycle = await getOrCreateClient(workspaceRoot);
   await lifecycle.ensureFile(filePath);
 
   const fileUri = url.pathToFileURL(filePath).href;
+  const destinationUri = url.pathToFileURL(destinationFile).href;
   const range = {
     start: { line, character: column },
     end: { line, character: column },
@@ -45,12 +56,34 @@ async function moveFunction(input: {
     return { ok: false, filesChanged: [], code: "no_move_action" };
   }
 
-  const action = actions[0];
-  let changed: string[] = [];
-  if (action.edit) {
-    changed = applyWorkspaceEdit(action.edit);
+  let action = actions[0];
+
+  // Attempt codeAction/resolve with destination file (tsserver-language-server convention).
+  // Requires codeActionProvider.resolveProvider; falls back gracefully if unsupported.
+  if (!action.edit) {
+    try {
+      const resolved = (await lifecycle.client.request<CodeAction>("codeAction/resolve", {
+        ...action,
+        data: {
+          interactiveRefactorArguments: { targetFile: destinationUri },
+        },
+      }));
+      action = resolved;
+    } catch {
+      // Server does not support codeAction/resolve — proceed without destination
+    }
   }
 
+  if (!action.edit) {
+    return {
+      ok: false,
+      filesChanged: [],
+      code: "destination_unsupported",
+      hint: "tsserver-language-server does not honor interactiveRefactorArguments via standard LSP",
+    };
+  }
+
+  const changed = applyWorkspaceEdit(action.edit);
   return { ok: true, filesChanged: changed };
 }
 
