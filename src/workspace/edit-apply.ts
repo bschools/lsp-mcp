@@ -77,7 +77,13 @@ export function applyWorkspaceEdit(edit: WorkspaceEdit): string[] {
 
   for (const [filePath, edits] of fileEdits) {
     if (edits.length === 0) continue;
-    const original = fs.readFileSync(filePath, "utf8");
+    let original: string;
+    try {
+      original = fs.readFileSync(filePath, "utf8");
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+      original = "";
+    }
     const updated = applyEditsToContent(original, edits);
     if (updated !== original) {
       atomicWrite(filePath, updated);

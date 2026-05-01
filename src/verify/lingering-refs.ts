@@ -6,6 +6,8 @@ export interface LingeringRefsOptions {
   workspaceRoot: string;
   oldName: string;
   excludePaths: string[];
+  /** Override the default word-boundary pattern. Useful for specifier-aware searches. */
+  patternOverride?: RegExp;
 }
 
 const TEXT_EXTENSIONS = new Set([
@@ -35,16 +37,18 @@ const SKIP_DIRS = new Set([
 const MAX_FILE_SIZE = 1_000_000; // 1 MB
 
 export function findLingeringReferences(opts: LingeringRefsOptions): string[] {
-  const { workspaceRoot, oldName, excludePaths } = opts;
+  const { workspaceRoot, oldName, excludePaths, patternOverride } = opts;
   const excludeSet = new Set(excludePaths.map((p) => path.resolve(p)));
-  const pattern = new RegExp(`\\b${escapeRegex(oldName)}\\b`);
+  const pattern = patternOverride ?? new RegExp(`\\b${escapeRegex(oldName)}\\b`);
 
-  // Prefer git grep when the workspace is a git repo — honors .gitignore
+  // Prefer git grep when the workspace is a git repo — honors .gitignore.
+  // Use -P (PCRE) so \b is a true word boundary; falls through to FS walk if
+  // the git build lacks libpcre (non-1 exit).
   if (isGitRepo(workspaceRoot)) {
     try {
       const output = execFileSync(
         "git",
-        ["grep", "-l", "-E", pattern.source, "--", ":!node_modules", ":!dist", ":!build"],
+        ["grep", "-l", "-P", pattern.source, "--", ":!node_modules", ":!dist", ":!build"],
         { cwd: workspaceRoot, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
       );
       return output

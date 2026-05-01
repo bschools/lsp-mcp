@@ -1,4 +1,5 @@
 import { z } from "zod";
+import * as fs from "node:fs";
 import { evictClient, getOrCreateClient } from "../lsp/factory.js";
 import { detectWorkspaceRoot } from "../workspace/detect.js";
 import { applyWorkspaceEdit, WorkspaceEdit } from "../workspace/edit-apply.js";
@@ -66,6 +67,23 @@ async function renameSymbol(input: {
     }
   }
 
+  // prepareRename not supported or returned no placeholder — derive from file content
+  // so verification pass never silently no-ops
+  if (!oldName) {
+    try {
+      const content = fs.readFileSync(filePath, "utf8");
+      const targetLine = content.split("\n")[line] ?? "";
+      const before = targetLine.slice(0, column);
+      const after = targetLine.slice(column);
+      const wordBefore = /([A-Za-z_$][A-Za-z0-9_$]*)$/.exec(before)?.[1] ?? "";
+      const wordAfter = /^([A-Za-z0-9_$]*)/.exec(after)?.[0] ?? "";
+      const derived = wordBefore + wordAfter;
+      if (derived) oldName = derived;
+    } catch {
+      // Proceed without oldName; verification skips
+    }
+  }
+
   // Perform rename, with Debug-Failure retry
   const performRename = async (): Promise<WorkspaceEdit | null> => {
     return (await lifecycle.client.request("textDocument/rename", {
@@ -89,7 +107,7 @@ async function renameSymbol(input: {
       await lifecycle.ensureFile(filePath);
       try {
         edit = await performRename();
-      } catch (retryErr) {
+      } catch {
         return {
           ok: false,
           filesChanged: [],
