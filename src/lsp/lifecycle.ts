@@ -5,13 +5,23 @@ import * as path from "node:path";
 import * as url from "node:url";
 import { LspClient } from "./client.js";
 
+export interface Diagnostic {
+  range: { start: { line: number; character: number }; end: { line: number; character: number } };
+  severity?: number;
+  code?: string | number;
+  source?: string;
+  message: string;
+}
+
 export interface LspLifecycle {
   client: LspClient;
+  diagnosticsByUri: Map<string, Diagnostic[]>;
   shutdown(): Promise<void>;
   didOpen(filePath: string): Promise<void>;
   didChange(filePath: string): Promise<void>;
   didClose(filePath: string): Promise<void>;
   ensureFile(filePath: string): Promise<void>;
+  waitForDiagnostics(uri: string, timeoutMs?: number): Promise<Diagnostic[]>;
 }
 
 type OpenFileInfo = { version: number; mtimeMs: number };
@@ -33,6 +43,14 @@ export async function createLspLifecycle(
 
   const client = new LspClient(proc);
   const openFiles = new Map<string, OpenFileInfo>();
+  const diagnosticsByUri = new Map<string, Diagnostic[]>();
+
+  client.onNotification((method, params) => {
+    if (method === "textDocument/publishDiagnostics") {
+      const p = params as { uri: string; diagnostics: Diagnostic[] };
+      diagnosticsByUri.set(p.uri, p.diagnostics);
+    }
+  });
 
   await client.request("initialize", {
     processId: process.pid,
@@ -116,6 +134,26 @@ export async function createLspLifecycle(
     await didOpen(filePath);
   }
 
+  async function waitForDiagnostics(uri: string, timeoutMs = 5000): Promise<Diagnostic[]> {
+    // tsserver emits two publishDiagnostics rounds per file: syntactic (fast, may be [])
+    // then semantic (may carry real errors). We wait for the first notification to arrive,
+    // then allow up to SETTLE_MS more for the semantic pass before returning.
+    const SETTLE_MS = 2500;
+    const deadline = Date.now() + timeoutMs;
+    let firstSeenAt: number | undefined;
+
+    while (Date.now() < deadline) {
+      const current = diagnosticsByUri.get(uri);
+      if (current !== undefined) {
+        if (current.length > 0) return current;
+        if (firstSeenAt === undefined) firstSeenAt = Date.now();
+        if (Date.now() - firstSeenAt >= SETTLE_MS) return current;
+      }
+      await new Promise((r) => setTimeout(r, 150));
+    }
+    return diagnosticsByUri.get(uri) ?? [];
+  }
+
   async function shutdown(): Promise<void> {
     // Close all tracked files
     for (const uri of openFiles.keys()) {
@@ -132,7 +170,7 @@ export async function createLspLifecycle(
     proc.kill();
   }
 
-  return { client, shutdown, didOpen, didChange, didClose, ensureFile };
+  return { client, diagnosticsByUri, shutdown, didOpen, didChange, didClose, ensureFile, waitForDiagnostics };
 }
 
 const WARMUP_EXTENSIONS = new Set([".ts", ".tsx", ".mts", ".cts"]);
