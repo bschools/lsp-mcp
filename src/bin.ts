@@ -7,6 +7,9 @@ import "./tools/find-references.js";
 import "./tools/rename-file.js";
 import "./tools/extract-function.js";
 import "./tools/move-function.js";
+import "./tools/get-diagnostics.js";
+import "./tools/hover.js";
+import "./tools/go-to-definition.js";
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
