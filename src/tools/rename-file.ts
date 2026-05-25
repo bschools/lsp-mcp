@@ -38,6 +38,12 @@ async function renameFile(input: {
   const changed: string[] = [];
   if (edit) {
     changed.push(...applyWorkspaceEdit(edit));
+    // Sync TS LS in-memory buffer with the disk edits. Without this, a subsequent
+    // willRenameFiles call (e.g. renaming a paired .spec.ts) uses the stale
+    // pre-edit content and produces mangled specifiers like "schemaa.schema".
+    for (const changedFile of changed) {
+      await lifecycle.didChange(changedFile);
+    }
   }
 
   // Actual FS rename
