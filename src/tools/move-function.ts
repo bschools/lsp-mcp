@@ -84,6 +84,9 @@ async function moveFunction(input: MoveFunctionInput): Promise<MoveFunctionResul
   }
 
   const changed = applyWorkspaceEdit(action.edit);
+  for (const f of changed) {
+    await lifecycle.didChange(f);
+  }
   return { ok: true, filesChanged: changed };
 }
 

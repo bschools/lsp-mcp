@@ -136,6 +136,9 @@ async function renameSymbol(input: {
   }
 
   const filesChanged = applyWorkspaceEdit(edit);
+  for (const f of filesChanged) {
+    await lifecycle.didChange(f);
+  }
 
   // Verification pass
   const lingeringReferences = oldName

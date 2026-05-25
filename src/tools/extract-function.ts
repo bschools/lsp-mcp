@@ -77,9 +77,11 @@ async function extractFunction(input: ExtractFunctionInput): Promise<ExtractFunc
   // Derive placeholder position before applying edits (coords are pre-edit)
   const placeholder = derivePlaceholder(action.edit, fileUri, startLine);
   const changed = applyWorkspaceEdit(action.edit);
+  for (const f of changed) {
+    await lifecycle.didChange(f);
+  }
 
   if (placeholder && placeholder.name !== newName) {
-    await lifecycle.ensureFile(filePath);
     let renameEdit: WorkspaceEdit | null = null;
     try {
       renameEdit = await lifecycle.client.request<WorkspaceEdit | null>(
