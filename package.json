@@ -25,6 +25,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.17.0",
+    "chokidar": "^4",
     "zod": "^3.23.0"
   },
   "devDependencies": {

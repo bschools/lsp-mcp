@@ -4,6 +4,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as url from "node:url";
 import { LspClient } from "./client.js";
+import { isWatchableSourceFile, shouldSkipDir } from "./source-filter.js";
+import { createSourceWatcher, type SourceWatcher } from "./watcher.js";
 
 export interface Diagnostic {
   range: { start: { line: number; character: number }; end: { line: number; character: number } };
@@ -34,11 +36,19 @@ export async function createLspLifecycle(
     stdio: ["pipe", "pipe", "pipe"],
   });
 
-  if (proc.stderr) {
-    const logDir = process.env.LSP_MCP_LOG_DIR ?? os.tmpdir();
-    const logPath = path.join(logDir, `lsp-mcp-tsserver-${Date.now()}.log`);
-    const logStream = fs.createWriteStream(logPath, { flags: "a" });
-    proc.stderr.pipe(logStream);
+  const logDir = process.env.LSP_MCP_LOG_DIR ?? os.tmpdir();
+  const logPath = path.join(logDir, `lsp-mcp-tsserver-${Date.now()}.log`);
+  const logStream = fs.createWriteStream(logPath, { flags: "a" });
+  if (proc.stderr) proc.stderr.pipe(logStream);
+
+  // Watcher errors (e.g. inotify/descriptor exhaustion) go to the same log
+  // stream — logged, never thrown (AC: degrade to current behavior on failure).
+  function logWatcher(message: string): void {
+    try {
+      logStream.write(`[watcher] ${message}\n`);
+    } catch {
+      // logging must never throw
+    }
   }
 
   const client = new LspClient(proc);
@@ -77,10 +87,54 @@ export async function createLspLifecycle(
   // cross-file references before the first rename/references call.
   await warmUpWorkspace(workspaceRoot, (p) => didOpen(p));
 
+  // Watch the workspace for external changes (git checkout, generators, other
+  // agents) so tsserver buffers stay in sync with disk. Started AFTER warmup,
+  // closed FIRST in shutdown(). LSP_MCP_NO_WATCH disables it entirely.
+  let watcher: SourceWatcher | undefined;
+  if (!process.env.LSP_MCP_NO_WATCH) {
+    const debounceMs = Number(process.env.LSP_MCP_WATCH_DEBOUNCE_MS ?? 150);
+    watcher = createSourceWatcher(workspaceRoot, {
+      debounceMs,
+      onChange: (p) => didChange(p),
+      onAdd: async (p) => {
+        const fileUri = url.pathToFileURL(p).href;
+        const wasOpen = openFiles.has(fileUri);
+        await didOpen(p);
+        // Structural notice only for a GENUINELY new file. chokidar reports an
+        // atomic rename-onto-existing path as 'add' too; deriving created-ness
+        // from openFiles membership (not the raw event) avoids mislabeling a
+        // content change as a create. textDocument/didChange stays authoritative
+        // for already-open docs, so no redundant notice fires on pure edits.
+        if (!wasOpen && openFiles.has(fileUri)) {
+          client.notify("workspace/didChangeWatchedFiles", {
+            changes: [{ uri: fileUri, type: 1 }], // 1 = Created
+          });
+        }
+      },
+      onUnlink: async (p) => {
+        const fileUri = url.pathToFileURL(p).href;
+        const wasOpen = openFiles.has(fileUri);
+        await didClose(p);
+        if (wasOpen) {
+          client.notify("workspace/didChangeWatchedFiles", {
+            changes: [{ uri: fileUri, type: 3 }], // 3 = Deleted
+          });
+        }
+      },
+      onError: (err) => logWatcher(err instanceof Error ? (err.stack ?? err.message) : String(err)),
+    });
+  }
+
   async function didOpen(filePath: string): Promise<void> {
     const fileUri = url.pathToFileURL(filePath).href;
-    const stat = fs.statSync(filePath);
-    const text = fs.readFileSync(filePath, "utf8");
+    let stat: fs.Stats;
+    let text: string;
+    try {
+      stat = fs.statSync(filePath);
+      text = fs.readFileSync(filePath, "utf8");
+    } catch {
+      return; // file vanished between watcher detection and read — skip
+    }
 
     if (openFiles.has(fileUri)) {
       // File already open — check mtime drift
@@ -104,8 +158,14 @@ export async function createLspLifecycle(
 
   async function didChange(filePath: string): Promise<void> {
     const fileUri = url.pathToFileURL(filePath).href;
-    const stat = fs.statSync(filePath);
-    const text = fs.readFileSync(filePath, "utf8");
+    let stat: fs.Stats;
+    let text: string;
+    try {
+      stat = fs.statSync(filePath);
+      text = fs.readFileSync(filePath, "utf8");
+    } catch {
+      return; // file vanished between watcher detection and read — skip
+    }
     const info = openFiles.get(fileUri);
     const version = info ? info.version + 1 : 1;
 
@@ -155,6 +215,16 @@ export async function createLspLifecycle(
   }
 
   async function shutdown(): Promise<void> {
+    // Close the watcher FIRST so no late event reopens a buffer mid-shutdown.
+    if (watcher) {
+      try {
+        await watcher.close();
+      } catch {
+        // best-effort
+      }
+      watcher = undefined;
+    }
+
     // Close all tracked files
     for (const uri of openFiles.keys()) {
       client.notify("textDocument/didClose", { textDocument: { uri } });
@@ -173,8 +243,6 @@ export async function createLspLifecycle(
   return { client, diagnosticsByUri, shutdown, didOpen, didChange, didClose, ensureFile, waitForDiagnostics };
 }
 
-const WARMUP_EXTENSIONS = new Set([".ts", ".tsx", ".mts", ".cts"]);
-const WARMUP_SKIP_DIRS = new Set(["node_modules", "dist", ".git", "build", "out"]);
 const WARMUP_MAX_FILES = 500;
 
 async function warmUpWorkspace(
@@ -194,10 +262,10 @@ async function warmUpWorkspace(
     }
     for (const entry of entries) {
       if (entry.isDirectory()) {
-        if (WARMUP_SKIP_DIRS.has(entry.name) || entry.name.startsWith(".")) continue;
+        if (shouldSkipDir(entry.name)) continue;
         queue.push(path.join(dir, entry.name));
       } else if (entry.isFile()) {
-        if (WARMUP_EXTENSIONS.has(path.extname(entry.name))) {
+        if (isWatchableSourceFile(entry.name)) {
           files.push(path.join(dir, entry.name));
           if (files.length >= WARMUP_MAX_FILES) break;
         }
