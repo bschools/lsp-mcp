@@ -64,6 +64,45 @@ describe("createSourceWatcher — event contract", () => {
     expect(events.some((x) => x.kind === "change" && x.filePath === f)).toBe(true);
   }, 15000);
 
+  it("classifies the first edit of a PRE-EXISTING file as onChange, not onAdd", async () => {
+    // The shared beforeEach watcher is constructed before any file exists, so it
+    // structurally cannot express this case. Build a dedicated watcher AFTER
+    // seeding the file: chokidar's initial scan (its emit suppressed by
+    // ignoreInitial) still tracks the file, so its first edit arrives as a raw
+    // `change`. The watcher must resolve that to onChange — NOT onAdd, which
+    // would (in lifecycle) emit a spurious didChangeWatchedFiles Created notice
+    // for a file that already existed (the >500-warmup-cap path).
+    const preDir = fs.mkdtempSync(path.join(os.tmpdir(), "swatch-pre-"));
+    fs.mkdirSync(path.join(preDir, "src"), { recursive: true });
+    const f = path.join(preDir, "src", "pre.ts");
+    fs.writeFileSync(f, "export const pre = 1;\n"); // exists BEFORE the watcher
+
+    const local: Event[] = [];
+    const w = createSourceWatcher(preDir, {
+      debounceMs: 80,
+      onChange: (filePath) => {
+        local.push({ kind: "change", filePath });
+      },
+      onAdd: (filePath) => {
+        local.push({ kind: "add", filePath });
+      },
+      onUnlink: (filePath) => {
+        local.push({ kind: "unlink", filePath });
+      },
+    });
+    await sleep(400); // let chokidar finish its (ignoreInitial) ready scan
+
+    try {
+      fs.writeFileSync(f, "export const pre = 2;\n"); // first edit of the pre-existing file
+      await waitFor(local, (e) => e.some((x) => x.filePath === f));
+      expect(local.some((x) => x.kind === "change" && x.filePath === f)).toBe(true);
+      expect(local.some((x) => x.kind === "add" && x.filePath === f)).toBe(false);
+    } finally {
+      await w.close();
+      fs.rmSync(preDir, { recursive: true, force: true });
+    }
+  }, 15000);
+
   it("fires onUnlink when a tracked file is removed", async () => {
     const f = path.join(dir, "src", "b.ts");
     fs.writeFileSync(f, "export const b = 1;\n");

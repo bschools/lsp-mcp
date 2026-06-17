@@ -132,8 +132,15 @@ export async function createLspLifecycle(
     try {
       stat = fs.statSync(filePath);
       text = fs.readFileSync(filePath, "utf8");
-    } catch {
-      return; // file vanished between watcher detection and read — skip
+    } catch (err) {
+      // ENOENT is expected: the file vanished between watcher detection and
+      // read — skip silently. Any other stat/read failure (EACCES, EMFILE, …)
+      // is logged to the tsserver log stream, never swallowed (AC: watcher/
+      // stat/read errors are logged).
+      if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") {
+        logWatcher(`didOpen ${filePath}: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`);
+      }
+      return;
     }
 
     if (openFiles.has(fileUri)) {
@@ -163,8 +170,15 @@ export async function createLspLifecycle(
     try {
       stat = fs.statSync(filePath);
       text = fs.readFileSync(filePath, "utf8");
-    } catch {
-      return; // file vanished between watcher detection and read — skip
+    } catch (err) {
+      // ENOENT is expected: the file vanished between watcher detection and
+      // read — skip silently. Any other stat/read failure (EACCES, EMFILE, …)
+      // is logged to the tsserver log stream, never swallowed (AC: watcher/
+      // stat/read errors are logged).
+      if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") {
+        logWatcher(`didChange ${filePath}: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`);
+      }
+      return;
     }
     const info = openFiles.get(fileUri);
     const version = info ? info.version + 1 : 1;

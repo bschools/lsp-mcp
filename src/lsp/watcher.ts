@@ -35,11 +35,18 @@ export function createSourceWatcher(root: string, opts: SourceWatcherOptions): S
   const debounceMs = opts.debounceMs ?? 150;
   const resolvedRoot = path.resolve(root);
 
-  // Paths the watcher currently believes exist. Starts empty: ignoreInitial
-  // skips the warmup-time files, which lifecycle already opened.
+  // Paths the watcher has already reported. Starts empty: ignoreInitial skips
+  // the warmup-time files, which lifecycle already opened.
   const known = new Set<string>();
   // Per-path debounce timers; collapse a burst of raw events into one flush.
   const timers = new Map<string, ReturnType<typeof setTimeout>>();
+  // Paths for which chokidar fired a raw `add` in the current (pending) burst.
+  // chokidar fires `add` only for genuinely-new paths and `change` for files it
+  // already tracked — including pre-existing files whose initial scan was
+  // suppressed by ignoreInitial. So THIS, not the `known` set, is the
+  // authoritative add-vs-change discriminator: a pre-existing file's first edit
+  // arrives as `change` and must resolve to onChange, not onAdd.
+  const pendingAdds = new Set<string>();
 
   const watcher = watch(root, {
     ignoreInitial: true,
@@ -60,7 +67,8 @@ export function createSourceWatcher(root: string, opts: SourceWatcherOptions): S
     },
   });
 
-  function schedule(filePath: string): void {
+  function schedule(filePath: string, isAdd: boolean): void {
+    if (isAdd) pendingAdds.add(filePath);
     const existing = timers.get(filePath);
     if (existing) clearTimeout(existing);
     timers.set(
@@ -73,14 +81,22 @@ export function createSourceWatcher(root: string, opts: SourceWatcherOptions): S
   }
 
   async function flush(filePath: string): Promise<void> {
+    const sawAdd = pendingAdds.delete(filePath);
     const exists = fs.existsSync(filePath);
     try {
       if (exists) {
-        if (known.has(filePath)) {
-          await opts.onChange(filePath);
-        } else {
+        // onAdd ONLY for a genuinely-new path: chokidar fired a raw `add` AND we
+        // have not already reported this path. Everything else that exists is a
+        // content change — crucially a pre-existing file's first edit, which
+        // chokidar reports as `change` (its initial scan was suppressed by
+        // ignoreInitial). Classifying by the raw event, not by `known`, stops
+        // that first edit from being mislabeled a new file.
+        if (sawAdd && !known.has(filePath)) {
           known.add(filePath);
           await opts.onAdd(filePath);
+        } else {
+          known.add(filePath);
+          await opts.onChange(filePath);
         }
       } else {
         // Gone at flush → always onUnlink. The watcher's `known` set is NOT the
@@ -97,15 +113,16 @@ export function createSourceWatcher(root: string, opts: SourceWatcherOptions): S
     }
   }
 
-  watcher.on("add", schedule);
-  watcher.on("change", schedule);
-  watcher.on("unlink", schedule);
+  watcher.on("add", (p) => schedule(p, true));
+  watcher.on("change", (p) => schedule(p, false));
+  watcher.on("unlink", (p) => schedule(p, false));
   watcher.on("error", (err) => opts.onError?.(err));
 
   return {
     async close(): Promise<void> {
       for (const t of timers.values()) clearTimeout(t);
       timers.clear();
+      pendingAdds.clear();
       await watcher.close();
     },
   };
