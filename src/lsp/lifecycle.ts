@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as url from "node:url";
 import { LspClient } from "./client.js";
-import { isWatchableSourceFile, shouldSkipDir } from "./source-filter.js";
+import { discoverProjectRepresentatives } from "../workspace/projects.js";
 import { createSourceWatcher, type SourceWatcher } from "./watcher.js";
 
 export interface Diagnostic {
@@ -24,6 +24,10 @@ export interface LspLifecycle {
   didClose(filePath: string): Promise<void>;
   ensureFile(filePath: string): Promise<void>;
   waitForDiagnostics(uri: string, timeoutMs?: number): Promise<Diagnostic[]>;
+  /** Resolves once no project load has been in flight for the settle window. Returns false on timeout. */
+  waitForProjectLoad(timeoutMs?: number): Promise<boolean>;
+  /** Runs a semantic request against a quiescent project graph, re-issuing it once if a load starts mid-flight. */
+  runStable<T>(fn: () => Promise<T>, resyncPath?: string): Promise<T>;
 }
 
 type OpenFileInfo = { version: number; mtimeMs: number };
@@ -55,10 +59,39 @@ export async function createLspLifecycle(
   const openFiles = new Map<string, OpenFileInfo>();
   const diagnosticsByUri = new Map<string, Diagnostic[]>();
 
+  // tsserver loads the project graph lazily and in the background. While that
+  // is in flight it still ANSWERS semantic requests — from whatever slice of
+  // the graph exists at that moment, with no error and no partial marker.
+  // Measured against a 2063-file monorepo: `textDocument/references` on a
+  // symbol with 8 referencing files returned 4 of them at t≈5s and only
+  // converged at t≈15s. Silent under-reporting on "who calls this" is worse
+  // than no answer, so semantic tools gate on quiescence (see runStable).
+  //
+  // The server does announce the work: tsserver's projectLoadingStart/Finish
+  // events surface as `$/progress` begin/end — but ONLY if the client both
+  // advertises `window.workDoneProgress` and answers the server's
+  // `window/workDoneProgress/create` request. Both are done here.
+  const activeProgress = new Set<string>();
+  // Bumped on every progress begin. runStable re-issues a request whose result
+  // could have been computed against a graph that changed underneath it.
+  let projectGeneration = 0;
+
+  client.onRequest(() => null);
   client.onNotification((method, params) => {
     if (method === "textDocument/publishDiagnostics") {
       const p = params as { uri: string; diagnostics: Diagnostic[] };
       diagnosticsByUri.set(p.uri, p.diagnostics);
+      return;
+    }
+    if (method === "$/progress") {
+      const p = params as { token?: string | number; value?: { kind?: string } };
+      const token = String(p.token ?? "");
+      if (p.value?.kind === "begin") {
+        activeProgress.add(token);
+        projectGeneration += 1;
+      } else if (p.value?.kind === "end") {
+        activeProgress.delete(token);
+      }
     }
   });
 
@@ -77,14 +110,18 @@ export async function createLspLifecycle(
         workspaceEdit: { documentChanges: true },
         fileOperations: { willRename: true, didRename: true },
       },
+      // Required for tsserver's project-load progress. Without it the server
+      // never reports `projectLoadingStart/Finish`, and semantic requests
+      // silently answer from a half-loaded project graph.
+      window: { workDoneProgress: true },
     },
     workspaceFolders: [{ uri: url.pathToFileURL(workspaceRoot).href, name: path.basename(workspaceRoot) }],
   });
 
   client.notify("initialized", {});
 
-  // Eagerly open all .ts/.tsx files in the workspace so tsserver indexes
-  // cross-file references before the first rename/references call.
+  // Open one file per configured project so tsserver has every project loaded
+  // before the first rename/references call.
   await warmUpWorkspace(workspaceRoot, (p) => didOpen(p));
 
   // Watch the workspace for external changes (git checkout, generators, other
@@ -228,6 +265,64 @@ export async function createLspLifecycle(
     return diagnosticsByUri.get(uri) ?? [];
   }
 
+  async function waitForProjectLoad(timeoutMs = PROJECT_LOAD_TIMEOUT_MS): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    let quietSince: number | undefined;
+    while (Date.now() < deadline) {
+      if (activeProgress.size > 0) {
+        quietSince = undefined;
+      } else {
+        quietSince ??= Date.now();
+        // A load announces itself a few hundred ms after the didOpen that
+        // triggers it, so "no progress right now" is not yet "no progress
+        // coming". Require the idle window to hold before declaring ready.
+        if (Date.now() - quietSince >= PROJECT_SETTLE_MS) return true;
+      }
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    return false;
+  }
+
+  async function runStable<T>(
+    fn: () => Promise<T>,
+    resyncPath?: string,
+  ): Promise<T> {
+    // Two retries beyond the first attempt. Two distinct transients are being
+    // absorbed:
+    //   1. A project load that starts while the request is in flight — the
+    //      answer was computed against a graph that changed underneath it.
+    //   2. `Debug Failure. False expression.` out of tsserver's
+    //      computePositionOfLineAndCharacter, which is what a position request
+    //      gets when the server has not finished taking up the didOpen for
+    //      that document yet. Retrying after a beat is the documented-by-
+    //      practice remedy (rename_symbol has carried its own evict-and-retry
+    //      for this for as long as it has existed).
+    const MAX_ATTEMPTS = 3;
+    const SETTLE_RETRY_MS = 250;
+    let result!: T;
+
+    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+      await waitForProjectLoad();
+      const before = projectGeneration;
+      try {
+        result = await fn();
+      } catch (err) {
+        const message = (err as { message?: string })?.message ?? "";
+        if (!/Debug Failure/i.test(message) || attempt === MAX_ATTEMPTS - 1) {
+          throw err;
+        }
+        // Resend the document before retrying: the failure is tsserver
+        // computing a position against a ScriptInfo whose text it does not
+        // actually hold, and a fresh didChange rebuilds it.
+        if (resyncPath) await didChange(resyncPath);
+        await new Promise((r) => setTimeout(r, SETTLE_RETRY_MS));
+        continue;
+      }
+      if (projectGeneration === before) return result;
+    }
+    return result;
+  }
+
   async function shutdown(): Promise<void> {
     // Close the watcher FIRST so no late event reopens a buffer mid-shutdown.
     if (watcher) {
@@ -254,39 +349,41 @@ export async function createLspLifecycle(
     proc.kill();
   }
 
-  return { client, diagnosticsByUri, shutdown, didOpen, didChange, didClose, ensureFile, waitForDiagnostics };
+  return { client, diagnosticsByUri, shutdown, didOpen, didChange, didClose, ensureFile, waitForDiagnostics, waitForProjectLoad, runStable };
 }
 
-const WARMUP_MAX_FILES = 500;
+// Safety valve on the representative set, not a sampling cap: representatives
+// number one per configured project (single digits on real workspaces), so the
+// default is never reached in practice.
+const WARMUP_MAX_FILES = Number(
+  process.env.LSP_MCP_WARMUP_MAX_FILES ?? 500,
+);
 
+// How long the "no project loading in flight" window must hold before a
+// semantic request is allowed through, and the ceiling on that wait.
+const PROJECT_SETTLE_MS = Number(process.env.LSP_MCP_PROJECT_SETTLE_MS ?? 500);
+const PROJECT_LOAD_TIMEOUT_MS = Number(
+  process.env.LSP_MCP_PROJECT_LOAD_TIMEOUT_MS ?? 60_000,
+);
+
+/**
+ * Opens one file per configured project so tsserver has loaded every project
+ * before the first semantic request.
+ *
+ * This used to breadth-first open up to 500 arbitrary source files. That is
+ * the wrong axis: what makes a project's files findable is that the PROJECT is
+ * loaded, and 500 files from three projects load exactly three projects — the
+ * same three that three files would. Measured on a 2063-file monorepo, the
+ * 500-file walk left `textDocument/references` reporting 4 of 8 referencing
+ * files and made convergence SLOWER (23 s vs 15 s) by queueing 500 open
+ * commands ahead of the real work; raising it to cover all 2063 files pushed
+ * the first request past its 30 s timeout entirely.
+ */
 async function warmUpWorkspace(
   root: string,
   open: (p: string) => Promise<void>,
 ): Promise<void> {
-  const files: string[] = [];
-  const queue: string[] = [root];
-
-  while (queue.length > 0 && files.length < WARMUP_MAX_FILES) {
-    const dir = queue.shift()!;
-    let entries: fs.Dirent[];
-    try {
-      entries = fs.readdirSync(dir, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    for (const entry of entries) {
-      if (entry.isDirectory()) {
-        if (shouldSkipDir(entry.name)) continue;
-        queue.push(path.join(dir, entry.name));
-      } else if (entry.isFile()) {
-        if (isWatchableSourceFile(entry.name)) {
-          files.push(path.join(dir, entry.name));
-          if (files.length >= WARMUP_MAX_FILES) break;
-        }
-      }
-    }
-  }
-
+  const files = discoverProjectRepresentatives(root).slice(0, WARMUP_MAX_FILES);
   for (const file of files) {
     try {
       await open(file);

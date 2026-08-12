@@ -85,12 +85,18 @@ async function renameSymbol(input: {
   }
 
   // Perform rename, with Debug-Failure retry
+  // Gated on a quiescent project graph — a rename computed mid-load rewrites
+  // only the call sites tsserver happens to know about, leaving the rest
+  // dangling. See the project-load readiness block in lsp/lifecycle.ts.
   const performRename = async (): Promise<WorkspaceEdit | null> => {
-    return (await lifecycle.client.request("textDocument/rename", {
-      textDocument: { uri: fileUri },
-      position,
-      newName,
-    })) as WorkspaceEdit | null;
+    return (await lifecycle.runStable(() =>
+      lifecycle.client.request("textDocument/rename", {
+        textDocument: { uri: fileUri },
+        position,
+        newName,
+      }),
+      filePath,
+    )) as WorkspaceEdit | null;
   };
 
   let edit: WorkspaceEdit | null;

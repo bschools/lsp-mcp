@@ -46,11 +46,16 @@ async function moveFunction(input: MoveFunctionInput): Promise<MoveFunctionResul
     end: { line, character: column },
   };
 
-  const actions = (await lifecycle.client.request("textDocument/codeAction", {
-    textDocument: { uri: fileUri },
-    range,
-    context: { diagnostics: [], only: ["refactor.move"] },
-  })) as CodeAction[] | null;
+  // Gated on a quiescent project graph — the move rewrites importers, and
+  // importers in an unloaded project are absent from the edit. See lifecycle.
+  const actions = (await lifecycle.runStable(() =>
+    lifecycle.client.request("textDocument/codeAction", {
+      textDocument: { uri: fileUri },
+      range,
+      context: { diagnostics: [], only: ["refactor.move"] },
+    }),
+    filePath,
+  )) as CodeAction[] | null;
 
   if (!actions || actions.length === 0) {
     return { ok: false, filesChanged: [], code: "no_move_action" };

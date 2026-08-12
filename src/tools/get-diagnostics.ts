@@ -22,7 +22,15 @@ server.registerTool(
 
     await lifecycle.ensureFile(filePath);
     const fileUri = url.pathToFileURL(filePath).href;
-    const diagnostics = await lifecycle.waitForDiagnostics(fileUri, timeoutMs);
+    // Semantic diagnostics computed mid-load report phantom "Cannot find
+    // module" errors for every dependency in a project that has not loaded.
+    // runStable (not a bare waitForProjectLoad) so a load that begins just
+    // after the settle window opens re-runs the collection instead of
+    // returning the phantom set.
+    const diagnostics = await lifecycle.runStable(
+      () => lifecycle.waitForDiagnostics(fileUri, timeoutMs),
+      filePath,
+    );
 
     return {
       content: [{ type: "text", text: JSON.stringify({ filePath, diagnostics }, null, 2) }],

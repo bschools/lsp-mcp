@@ -30,10 +30,14 @@ async function renameFile(input: {
   const oldUri = url.pathToFileURL(oldPath).href;
   const newUri = url.pathToFileURL(newPath).href;
 
-  // willRenameFiles — server returns edits for importers
-  const edit = (await lifecycle.client.request("workspace/willRenameFiles", {
-    files: [{ oldUri, newUri }],
-  })) as WorkspaceEdit | null;
+  // willRenameFiles — server returns edits for importers. Gated on a quiescent
+  // project graph: importers in a project tsserver has not loaded yet are
+  // simply absent from the edit, so their import specifiers break silently.
+  const edit = (await lifecycle.runStable(() =>
+    lifecycle.client.request("workspace/willRenameFiles", {
+      files: [{ oldUri, newUri }],
+    }),
+  )) as WorkspaceEdit | null;
 
   const changed: string[] = [];
   if (edit) {
