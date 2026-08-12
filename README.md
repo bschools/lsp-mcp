@@ -8,6 +8,7 @@ An MCP server that exposes LSP refactoring operations as Claude Code tools.
 |------|-------------|
 | `rename_symbol` | Rename a symbol project-wide (class, method, variable, parameter) |
 | `find_references` | Find all references to a symbol across the workspace |
+| `document_symbols` | List the symbols a file declares — no position needed; optional `name` filter |
 | `rename_file` | Rename a file and update all import specifiers |
 | `extract_function` | Extract a code block into a named function (v0.2) |
 | `move_function` | Move a function to a different file (v0.2, experimental) |

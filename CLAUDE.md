@@ -35,7 +35,9 @@ This is an **MCP server** (`@modelcontextprotocol/sdk`) that bridges to a **Type
 
 2. **`src/server.ts`** — singleton `McpServer` instance. All tools register against it via `server.registerTool(...)`.
 
-3. **`src/tools/`** — one file per MCP tool. Each file calls `getOrCreateClient(workspaceRoot)` to get an `LspLifecycle`, sends LSP requests, applies the resulting `WorkspaceEdit` to disk, and returns JSON to the MCP caller. Tools currently registered in `bin.ts`: `rename_symbol`, `find_references`, `rename_file`. `extract_function` and `move_function` are scaffolded but not yet wired in `bin.ts`.
+3. **`src/tools/`** — one file per MCP tool. Each file calls `getOrCreateClient(workspaceRoot)` to get an `LspLifecycle`, sends LSP requests, applies the resulting `WorkspaceEdit` to disk, and returns JSON to the MCP caller. All are registered in `bin.ts`.
+
+   Tools whose answer depends on the project graph (`rename_symbol`, `find_references`, `rename_file`, `go_to_definition`, `move_function`, `get_diagnostics`) issue their request through `lifecycle.runStable`, which gates on project-load quiescence — see layer 5. `document_symbols` deliberately does not: it takes a file rather than a position, and `textDocument/documentSymbol` is answered per-file by the syntax server, so paying the project-load wait would remove the very thing that makes it cheap enough to ask about many files.
 
 4. **`src/lsp/factory.ts`** — per-workspace `LspLifecycle` cache with idle eviction (default 5 min). `getOrCreateClient(workspaceRoot)` returns a cached or freshly-initialized lifecycle; `evictClient()` kills and removes it.
 

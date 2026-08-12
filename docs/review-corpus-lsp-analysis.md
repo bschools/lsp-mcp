@@ -189,8 +189,22 @@ is worth building.
 1. ~~Fix reference recall.~~ Done — see §1. Pays off immediately for
    agent-facing `find_references` and `rename_symbol`, independent of any
    pipeline work.
-2. Add `document_symbols` — the only primitive that makes
-   `R1.path_symbol_existence` LSP-answerable.
+2. ~~Add `document_symbols`.~~ Done — the primitive that makes
+   `R1.path_symbol_existence` LSP-answerable: file in, declared symbols out, no
+   position required, nested symbols flattened to parent-qualified names
+   (`MessageService.sendMessage`). Verified on the two files this corpus
+   analysis kept returning to, both sub-second because it needs no project
+   load: `gate-admission.core.ts` → 88 symbols including `planSubtreeDigest`;
+   `message.service.ts` → 302 symbols including `MessageService.sendMessage`.
+   That second number is why the tool takes an optional `name` filter — the
+   unfiltered payload is ~90 KB, and the R1 question is only ever "does this
+   file declare this one name".
+
+   Note what this fixes and what it does not. It replaces
+   `grep -F symbol file`, which cannot tell a declaration from a mention in a
+   comment or string — the documented `R1` false-positive class. It does
+   **not** touch the 188 `path::Symbol` suppressions from §3; those remain a
+   granularity bug in `extractCallgraphCoverageFindings`.
 3. Library/CLI entrypoint plus a persistent daemon, without which (2) is
    unusable from `cross-checks.ts`.
 4. Only then, migrate the call-graph-backed R4/R2 checks to live references.
