@@ -302,7 +302,13 @@ export async function createLspLifecycle(
     let result!: T;
 
     for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-      await waitForProjectLoad();
+      const settled = await waitForProjectLoad();
+      if (!settled) {
+        process.stderr.write(
+          `[lsp-mcp] project graph still loading after ${PROJECT_LOAD_TIMEOUT_MS}ms; ` +
+            `answering from a partial graph (result may under-report)\n`,
+        );
+      }
       const before = projectGeneration;
       try {
         result = await fn();
@@ -320,6 +326,13 @@ export async function createLspLifecycle(
       }
       if (projectGeneration === before) return result;
     }
+    // Attempts exhausted with the graph still churning. The result stands (a
+    // partial answer beats no answer) but it is exactly the silent-truncation
+    // shape this module exists to close, so it does not leave unannounced.
+    process.stderr.write(
+      `[lsp-mcp] project graph changed under ${MAX_ATTEMPTS} consecutive attempts; ` +
+        `returning the last result (may under-report)\n`,
+    );
     return result;
   }
 
@@ -352,18 +365,38 @@ export async function createLspLifecycle(
   return { client, diagnosticsByUri, shutdown, didOpen, didChange, didClose, ensureFile, waitForDiagnostics, waitForProjectLoad, runStable };
 }
 
+/**
+ * Read a numeric env knob, falling back on anything that is not a finite
+ * number. A bare `Number(process.env.X)` turns a typo into `NaN`, and every
+ * one of these knobs fails OPEN on NaN — `slice(0, NaN)` warms up zero files,
+ * `Date.now() < NaN` ends the readiness wait on its first tick. That silently
+ * reinstates the exact under-reporting this module exists to prevent, so a bad
+ * value is announced and ignored rather than honoured.
+ */
+function numberEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined) return fallback;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) {
+    process.stderr.write(
+      `[lsp-mcp] ${name}="${raw}" is not a number; using ${fallback}\n`,
+    );
+    return fallback;
+  }
+  return parsed;
+}
+
 // Safety valve on the representative set, not a sampling cap: representatives
 // number one per configured project (single digits on real workspaces), so the
 // default is never reached in practice.
-const WARMUP_MAX_FILES = Number(
-  process.env.LSP_MCP_WARMUP_MAX_FILES ?? 500,
-);
+const WARMUP_MAX_FILES = numberEnv("LSP_MCP_WARMUP_MAX_FILES", 500);
 
 // How long the "no project loading in flight" window must hold before a
 // semantic request is allowed through, and the ceiling on that wait.
-const PROJECT_SETTLE_MS = Number(process.env.LSP_MCP_PROJECT_SETTLE_MS ?? 500);
-const PROJECT_LOAD_TIMEOUT_MS = Number(
-  process.env.LSP_MCP_PROJECT_LOAD_TIMEOUT_MS ?? 60_000,
+const PROJECT_SETTLE_MS = numberEnv("LSP_MCP_PROJECT_SETTLE_MS", 500);
+const PROJECT_LOAD_TIMEOUT_MS = numberEnv(
+  "LSP_MCP_PROJECT_LOAD_TIMEOUT_MS",
+  60_000,
 );
 
 /**

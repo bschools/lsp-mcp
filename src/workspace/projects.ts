@@ -184,12 +184,19 @@ function declaredRoots(configPath: string): string[] | null {
   return declaresFileSurface ? roots : null;
 }
 
-/** `extends` targets, in order. TypeScript 5 allows a string or an array. */
+/**
+ * `extends` targets in resolution priority order — highest first.
+ *
+ * TypeScript 5 allows a string or an array, and an array is LAST-wins: a later
+ * base overrides what an earlier one declared. Callers here take the first
+ * target that answers, so the array is reversed to make "first that answers"
+ * and "last that declared it" the same entry.
+ */
 function extendsTargets(config: Record<string, unknown> | null): string[] {
   const value = config?.extends;
   if (typeof value === "string") return [value];
   if (Array.isArray(value)) {
-    return value.filter((v): v is string => typeof v === "string");
+    return value.filter((v): v is string => typeof v === "string").reverse();
   }
   return [];
 }
@@ -224,14 +231,16 @@ function inheritedRoots(configPath: string, depth: number): string[] | null {
 }
 
 /**
- * Directories a project's `include`/`files` point at. A glob contributes the
- * literal path segments before its first wildcard (`libs/**\/*.ts` → `libs`),
- * which is all that is needed to go looking for one file the project owns.
+ * Where to go looking for a project's representative file, in precedence
+ * order: what the config declares itself, else what it inherits through
+ * `extends`, else its own directory.
+ *
+ * A declared-but-empty surface is honoured as empty. A solution-style config
+ * (`files: []` plus `references`) owns no files — its referenced projects
+ * carry the whole surface — so it yields no roots and no representative, and
+ * loading an extra project for zero reference coverage is avoided.
  */
 function includeRoots(configPath: string): string[] {
-  // A solution-style config declares `files: []` and owns nothing — its
-  // referenced projects carry the file surface, so emitting a representative
-  // for it would load an extra project for no reference coverage.
   const own = declaredRoots(configPath);
   if (own !== null) return own;
 

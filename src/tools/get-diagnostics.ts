@@ -27,10 +27,16 @@ server.registerTool(
     // runStable (not a bare waitForProjectLoad) so a load that begins just
     // after the settle window opens re-runs the collection instead of
     // returning the phantom set.
-    const diagnostics = await lifecycle.runStable(
-      () => lifecycle.waitForDiagnostics(fileUri, timeoutMs),
-      filePath,
-    );
+    //
+    // Evicting the cached entry first is what makes the retry mean anything:
+    // waitForDiagnostics reads diagnosticsByUri and returns the moment it
+    // finds a non-empty entry, so a retry over a live cache hands back the
+    // same phantom set it was retrying to escape. Dropping the entry forces
+    // the wait to block on a fresh publish from the now-loaded project.
+    const diagnostics = await lifecycle.runStable(() => {
+      lifecycle.diagnosticsByUri.delete(fileUri);
+      return lifecycle.waitForDiagnostics(fileUri, timeoutMs);
+    }, filePath);
 
     return {
       content: [{ type: "text", text: JSON.stringify({ filePath, diagnostics }, null, 2) }],

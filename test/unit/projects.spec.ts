@@ -91,9 +91,9 @@ describe("discoverProjectRepresentatives", () => {
 
     const reps = discoverProjectRepresentatives(root).map((p) => path.relative(root, p));
 
-    // Membership, not length: the solution root itself contributes a
-    // representative too, and whether that dedups against the libs one is an
-    // artifact of walk order, not the property under test.
+    // Membership, not length: which file inside libs/ is picked is an artifact
+    // of walk order, not the property under test. The solution root itself
+    // contributes nothing — `files: []` is a declared-and-empty surface.
     expect(reps.some((p) => p.startsWith(path.join("libs", "a")))).toBe(true);
     expect(reps).toContain(path.join("apps", "server", "src", "main.ts"));
   });
@@ -135,7 +135,7 @@ describe("discoverProjectRepresentatives", () => {
     expect(reps).toContain(path.join("packages", "pkg", "src", "real.ts"));
   });
 
-  it("follows an extends chain given as an array, last-wins order aside", () => {
+  it("follows an extends chain given as an array", () => {
     write("tsconfig.json", JSON.stringify({ extends: ["./base-a.json", "./base-b.json"] }));
     write("base-a.json", JSON.stringify({ compilerOptions: { strict: true } }));
     write("base-b.json", JSON.stringify({ include: ["src/**/*.ts"] }));
@@ -145,6 +145,35 @@ describe("discoverProjectRepresentatives", () => {
     const reps = discoverProjectRepresentatives(root).map((p) => path.relative(root, p));
 
     expect(reps).toEqual([path.join("src", "only.ts")]);
+  });
+
+  it("takes the LAST array-extends base that declares a file surface", () => {
+    // TypeScript's array `extends` is last-wins: base-b's include overrides
+    // base-a's. Walking the array front-to-back and stopping at the first
+    // answer inverts that and lands the representative in the wrong project.
+    write("tsconfig.json", JSON.stringify({ extends: ["./base-a.json", "./base-b.json"] }));
+    write("base-a.json", JSON.stringify({ include: ["overridden/**/*.ts"] }));
+    write("base-b.json", JSON.stringify({ include: ["winner/**/*.ts"] }));
+    write("overridden/loser.ts", "export const loser = 1;\n");
+    write("winner/real.ts", "export const real = 1;\n");
+
+    const reps = discoverProjectRepresentatives(root).map((p) => path.relative(root, p));
+
+    expect(reps).toEqual([path.join("winner", "real.ts")]);
+  });
+
+  it("emits no representative for a solution-style root that owns no files", () => {
+    // `files: []` is a declared-and-empty surface, not an absent one: the
+    // referenced projects carry every file, so a representative for the root
+    // would load an extra project buying no reference coverage.
+    write("tsconfig.json", JSON.stringify({ files: [], references: [{ path: "./tsconfig.libs.json" }] }));
+    write("tsconfig.libs.json", JSON.stringify({ include: ["libs/**/*.ts"] }));
+    write("libs/one.ts", "export const one = 1;\n");
+    write("stray.ts", "export const stray = 1;\n");
+
+    const reps = discoverProjectRepresentatives(root).map((p) => path.relative(root, p));
+
+    expect(reps).toEqual([path.join("libs", "one.ts")]);
   });
 
   it("survives a workspace with no tsconfig at all", () => {
