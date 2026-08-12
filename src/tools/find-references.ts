@@ -42,11 +42,17 @@ async function findReferences(input: {
   await lifecycle.ensureFile(filePath);
   const fileUri = url.pathToFileURL(filePath).href;
 
-  const locations = ((await lifecycle.client.request("textDocument/references", {
-    textDocument: { uri: fileUri },
-    position: { line, character: column },
-    context: { includeDeclaration },
-  })) ?? []) as Location[];
+  // Gated on a quiescent project graph: tsserver answers references from a
+  // partially-loaded graph without saying so, which silently under-reports
+  // callers. See the project-load readiness block in lsp/lifecycle.ts.
+  const locations = ((await lifecycle.runStable(() =>
+    lifecycle.client.request("textDocument/references", {
+      textDocument: { uri: fileUri },
+      position: { line, character: column },
+      context: { includeDeclaration },
+    }),
+    filePath,
+  )) ?? []) as Location[];
 
   const grouped = new Map<string, Range[]>();
   for (const loc of locations) {

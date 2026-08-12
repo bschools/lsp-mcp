@@ -40,10 +40,15 @@ server.registerTool(
     await lifecycle.ensureFile(filePath);
     const fileUri = url.pathToFileURL(filePath).href;
 
-    const raw = (await lifecycle.client.request("textDocument/definition", {
-      textDocument: { uri: fileUri },
-      position: { line, character: column },
-    })) as Location | Location[] | null;
+    // Gated on a quiescent project graph — a definition in a project tsserver
+    // has not loaded yet resolves to nothing. See lsp/lifecycle.ts.
+    const raw = (await lifecycle.runStable(() =>
+      lifecycle.client.request("textDocument/definition", {
+        textDocument: { uri: fileUri },
+        position: { line, character: column },
+      }),
+      filePath,
+    )) as Location | Location[] | null;
 
     const locations: Location[] = raw === null ? [] : Array.isArray(raw) ? raw : [raw];
     const definitions: DefinitionLocation[] = locations.map((loc) => ({

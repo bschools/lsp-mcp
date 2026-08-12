@@ -10,6 +10,7 @@ import "./tools/move-function.js";
 import "./tools/get-diagnostics.js";
 import "./tools/hover.js";
 import "./tools/go-to-definition.js";
+import "./tools/document-symbols.js";
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
