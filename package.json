@@ -21,7 +21,7 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint src test",
     "prepare": "tsc",
-    "prepublishOnly": "pnpm run build && pnpm run test"
+    "prepublishOnly": "yarn build && yarn test"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.17.0",

@@ -4,9 +4,7 @@ dist/
 *.log
 .env
 
-# Yarn Berry install artifacts. This repo installs with npm/node_modules and
-# tracks no lockfile; a stray `yarn` run drops these, and committing them would
-# switch everyone to PnP resolution as a side effect.
+# Yarn install state. The repo installs with Yarn into node_modules
+# (.yarnrc.yml nodeLinker); yarn.lock is tracked.
 .yarn/
 .pnp.*
-yarn.lock
