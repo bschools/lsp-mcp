@@ -31,9 +31,11 @@ jobs:
         with:
           node-version: 20
           registry-url: https://registry.npmjs.org
+      # prepublishOnly runs the build and the integration tests, which spawn
+      # typescript-language-server from PATH.
+      - run: npm install -g typescript-language-server typescript
       - run: corepack enable
       - run: yarn install --immutable
-      - run: yarn build
       - run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
