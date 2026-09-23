@@ -15,10 +15,11 @@ jobs:
         with:
           node-version: 20
       - run: npm install -g typescript-language-server typescript
-      - run: npm install
-      - run: npm run typecheck
-      - run: npm run build
-      - run: npm test
+      - run: corepack enable
+      - run: yarn install --immutable
+      - run: yarn typecheck
+      - run: yarn build
+      - run: yarn test
 
   publish:
     needs: test
@@ -30,8 +31,9 @@ jobs:
         with:
           node-version: 20
           registry-url: https://registry.npmjs.org
-      - run: npm install
-      - run: npm run build
+      - run: corepack enable
+      - run: yarn install --immutable
+      - run: yarn build
       - run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
