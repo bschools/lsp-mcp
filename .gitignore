@@ -8,3 +8,6 @@ dist/
 # (.yarnrc.yml nodeLinker); yarn.lock is tracked.
 .yarn/
 .pnp.*
+
+# Coordinated plan worktrees
+.claude/worktrees/
