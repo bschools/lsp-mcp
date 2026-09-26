@@ -107,6 +107,10 @@ export async function createLspLifecycle(
         rename: { prepareSupport: true },
         references: {},
         codeAction: { codeActionLiteralSupport: { codeActionKind: { valueSet: [] } } },
+        // typescript-language-server publishes no diagnostics to a client that
+        // does not advertise this; get_diagnostics and rename verification
+        // would otherwise wait out their timeouts on an empty map.
+        publishDiagnostics: {},
       },
       workspace: {
         applyEdit: true,

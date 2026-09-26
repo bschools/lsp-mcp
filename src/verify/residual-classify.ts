@@ -63,8 +63,8 @@ const TIMED_OUT = Symbol("timed_out");
 
 /**
  * Post-edit semantic pass over residual identifier candidates. Each candidate
- * is classified from its definition and, when the definition is empty, from the
- * file's fresh diagnostics. No syntax allowlist decides a class. A deadline or
+ * is classified from its definition and, when the definition is empty or is the
+ * candidate itself, from the file's fresh diagnostics. No syntax allowlist decides a class. A deadline or
  * an unsettled graph leaves unclassified candidates `unclassifiable` and marks
  * the result incomplete; it never reports verified on a truncated set.
  */
@@ -105,8 +105,13 @@ export async function verifyResidualCandidates(opts: VerifyResidualOptions): Pro
   const openedByPass: string[] = [];
   try {
     for (const file of byFile.keys()) {
-      if (!deps.isOpen(file)) openedByPass.push(file);
-      deps.clearDiagnostics(file);
+      // The server publishes a file's diagnostics only when they change, and
+      // always once for a newly opened file. An open file's cached entry is its
+      // current state; a closed file's entry is the empty set sent on close.
+      if (!deps.isOpen(file)) {
+        openedByPass.push(file);
+        deps.clearDiagnostics(file);
+      }
       await deps.open(file);
     }
 
@@ -137,27 +142,39 @@ export async function verifyResidualCandidates(opts: VerifyResidualOptions): Pro
     }
 
     const { definitions, timedOut } = stable.value;
-    const emptyByFile = new Map<string, IdentifierCandidate[]>();
+    // Empty definitions, and self-definitions: an import of a name the module
+    // no longer exports resolves to its own specifier, exactly like a genuine
+    // local declaration. Only the file's diagnostics tell the two apart.
+    const selfDefined = new Map<IdentifierCandidate, DefinitionLocation>();
+    const diagnoseByFile = new Map<string, IdentifierCandidate[]>();
+    const diagnose = (c: IdentifierCandidate): void => {
+      const group = diagnoseByFile.get(c.path);
+      if (group) group.push(c);
+      else diagnoseByFile.set(c.path, [c]);
+    };
     for (const [c, locations] of definitions) {
       if (locations.length === 0) {
-        const group = emptyByFile.get(c.path);
-        if (group) group.push(c);
-        else emptyByFile.set(c.path, [c]);
+        diagnose(c);
         continue;
       }
       const target = locations.find((loc) => containsDeclaration(loc, renamedDeclaration));
-      kinds.set(
-        c,
-        target
-          ? { ...c, kind: "alias", definition: target }
-          : { ...c, kind: "homonym", definition: locations[0] },
-      );
+      if (target) {
+        kinds.set(c, { ...c, kind: "alias", definition: target });
+        continue;
+      }
+      const self = locations.find((loc) => loc.path === c.path && rangeContains(loc.range, c));
+      if (self) {
+        selfDefined.set(c, self);
+        diagnose(c);
+        continue;
+      }
+      kinds.set(c, { ...c, kind: "homonym", definition: locations[0] });
     }
     if (timedOut || remaining() <= 0) return finish(timeBudget());
 
     let diagnosticsTimedOut = false;
     await Promise.all(
-      [...emptyByFile].map(async ([file, group]) => {
+      [...diagnoseByFile].map(async ([file, group]) => {
         const left = remaining();
         if (left <= 0) {
           diagnosticsTimedOut = true;
@@ -173,12 +190,14 @@ export async function verifyResidualCandidates(opts: VerifyResidualOptions): Pro
           const match = diagnostics.find(
             (d) => UNBOUND_CODES.has(Number(d.code)) && rangeContains(d.range, c),
           );
-          kinds.set(
-            c,
-            match
-              ? { ...c, kind: "unresolved", diagnostic: { code: match.code!, message: match.message } }
-              : { ...c, kind: "untyped" },
-          );
+          const self = selfDefined.get(c);
+          if (match) {
+            kinds.set(c, { ...c, kind: "unresolved", diagnostic: { code: match.code!, message: match.message } });
+          } else if (self) {
+            kinds.set(c, { ...c, kind: "homonym", definition: self });
+          } else {
+            kinds.set(c, { ...c, kind: "untyped" });
+          }
         }
       }),
     );

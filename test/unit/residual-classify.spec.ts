@@ -172,6 +172,43 @@ describe("verifyResidualCandidates classes", () => {
 
     expect(result.classified[0].kind).toBe("untyped");
   });
+
+  describe("self-defined candidates", () => {
+    const c = cand("/ws/spec.ts", 0, 9);
+    const SELF: DefinitionLocation = {
+      path: "/ws/spec.ts",
+      range: { start: { line: 0, character: 9 }, end: { line: 0, character: 16 } },
+    };
+
+    async function classifySelf(diagnostics: Diagnostic[] | undefined) {
+      const { deps } = makeDeps({
+        definition: async () => [SELF],
+        diagnostics: { "/ws/spec.ts": diagnostics },
+      });
+      return verifyResidualCandidates({ candidates: [c], renamedDeclaration: DECL, deps, budget: budget() });
+    }
+
+    it("is unresolved when a missing-export diagnostic covers it", async () => {
+      const result = await classifySelf([diag(2305, 0, 9, 16)]);
+
+      expect(result.classified[0]).toMatchObject({ kind: "unresolved", diagnostic: { code: 2305 } });
+      expect(result.verified).toBe(false);
+    });
+
+    it("is a homonym when no unbound-name diagnostic covers it", async () => {
+      const result = await classifySelf([]);
+
+      expect(result.classified[0]).toMatchObject({ kind: "homonym", definition: SELF });
+      expect(result.verified).toBe(true);
+    });
+
+    it("is unclassifiable when diagnostics never arrive", async () => {
+      const result = await classifySelf(undefined);
+
+      expect(result.classified[0].kind).toBe("unclassifiable");
+      expect(result.verified).toBe(false);
+    });
+  });
 });
 
 describe("verifyResidualCandidates verified", () => {
@@ -263,9 +300,11 @@ describe("verifyResidualCandidates stable window", () => {
     expect(events.filter((e) => e === "runStable")).toHaveLength(1);
     const windowAt = events.indexOf("runStable");
     for (const f of files) {
-      expect(events.indexOf(`clear:${f}`)).toBeLessThan(windowAt);
       expect(events.indexOf(`open:${f}`)).toBeLessThan(windowAt);
     }
+    // Only newly opened files drop their cached diagnostics; an open file's
+    // entry is its current published state.
+    expect(events.filter((e) => e.startsWith("clear:"))).toEqual(["clear:/ws/a.ts", "clear:/ws/c.ts"]);
     expect(deps.definition).toHaveBeenCalledTimes(candidates.length);
     expect(result.verified).toBe(true);
   });
