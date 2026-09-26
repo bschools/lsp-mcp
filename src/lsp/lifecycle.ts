@@ -399,6 +399,112 @@ const PROJECT_LOAD_TIMEOUT_MS = numberEnv(
   60_000,
 );
 
+export type IncompleteCode = "project_loading" | "graph_changing";
+
+export type StableResult<T> =
+  | { complete: true; value: T }
+  | {
+      complete: false;
+      code: IncompleteCode;
+      retryable: true;
+      retryAfterMs: number;
+      elapsedMs: number;
+      attempts: number;
+      activeProjectLoads: number;
+      message: string;
+    };
+
+export type StableRequestDeps = {
+  waitForProjectLoad: (timeoutMs: number) => Promise<boolean>;
+  getGeneration: () => number;
+  getActiveProjectLoads: () => number;
+  resync: () => Promise<void>;
+  log: (line: string) => void;
+  now: () => number;
+  maxAttempts: number;
+  settleRetryMs: number;
+  projectLoadTimeoutMs: number;
+  settleMs: number;
+};
+
+/**
+ * Runs `fn` against a quiescent project graph. `fn` may issue several LSP
+ * requests; the generation compare covers the whole callback. Never returns a
+ * partial result: an unsettled or churning graph yields a typed incomplete.
+ */
+export async function runStableRequest<T>(
+  deps: StableRequestDeps,
+  fn: () => Promise<T>,
+): Promise<StableResult<T>> {
+  const startedAt = deps.now();
+
+  function incomplete(code: IncompleteCode, attempts: number, message: string): StableResult<T> {
+    const elapsedMs = deps.now() - startedAt;
+    const activeProjectLoads = deps.getActiveProjectLoads();
+    deps.log(
+      `[lsp-mcp] incomplete code=${code} elapsedMs=${elapsedMs} attempts=${attempts} ` +
+        `activeProjectLoads=${activeProjectLoads} retryAfterMs=${deps.settleMs}`,
+    );
+    return {
+      complete: false,
+      code,
+      retryable: true,
+      retryAfterMs: deps.settleMs,
+      elapsedMs,
+      attempts,
+      activeProjectLoads,
+      message,
+    };
+  }
+
+  for (let attempt = 0; attempt < deps.maxAttempts; attempt++) {
+    const settled = await deps.waitForProjectLoad(deps.projectLoadTimeoutMs);
+    if (!settled) {
+      return incomplete(
+        "project_loading",
+        attempt + 1,
+        `project graph still loading after ${deps.projectLoadTimeoutMs}ms`,
+      );
+    }
+    const before = deps.getGeneration();
+    let value: T;
+    try {
+      value = await fn();
+    } catch (err) {
+      const message = (err as { message?: string })?.message ?? "";
+      if (!/Debug Failure/i.test(message) || attempt === deps.maxAttempts - 1) {
+        throw err;
+      }
+      await deps.resync();
+      await new Promise((r) => setTimeout(r, deps.settleRetryMs));
+      continue;
+    }
+    if (deps.getGeneration() === before) return { complete: true, value };
+  }
+  return incomplete(
+    "graph_changing",
+    deps.maxAttempts,
+    `project graph changed under ${deps.maxAttempts} consecutive attempts`,
+  );
+}
+
+export function incompletePayload(result: Extract<StableResult<unknown>, { complete: false }>) {
+  return {
+    ok: false as const,
+    complete: false as const,
+    code: result.code,
+    retryable: true as const,
+    retryAfterMs: result.retryAfterMs,
+    elapsedMs: result.elapsedMs,
+    attempts: result.attempts,
+    activeProjectLoads: result.activeProjectLoads,
+    hint:
+      `The project graph is not settled (${result.code}). Wait ${result.retryAfterMs}ms and retry. ` +
+      `After three consecutive incomplete responses, stop retrying, inspect the tsserver log, ` +
+      `and treat the result as unavailable.`,
+  };
+}
+
 /**
  * Opens one file per configured project so tsserver has loaded every project
  * before the first semantic request.
