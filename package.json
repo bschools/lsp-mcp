@@ -26,12 +26,12 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.17.0",
     "chokidar": "^4",
+    "typescript": "^5.4.0",
     "zod": "^3.23.0"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
     "eslint": "^9.0.0",
-    "typescript": "^5.4.0",
     "typescript-eslint": "^8.0.0",
     "vitest": "^1.6.0"
   },

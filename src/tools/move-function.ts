@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { getOrCreateClient } from "../lsp/factory.js";
+import { incompletePayload } from "../lsp/lifecycle.js";
 import { detectWorkspaceRoot } from "../workspace/detect.js";
 import { applyWorkspaceEdit, WorkspaceEdit } from "../workspace/edit-apply.js";
 import { server } from "../server.js";
@@ -26,12 +27,18 @@ type MoveFunctionInput = {
   destinationFile: string;
 };
 
-type MoveFunctionResult = {
-  ok: boolean;
-  filesChanged: string[];
-  code?: string;
-  hint?: string;
-};
+type MoveFunctionResult =
+  | {
+      ok: boolean;
+      filesChanged: string[];
+      code?: string;
+      hint?: string;
+    }
+  | (ReturnType<typeof incompletePayload> & { filesChanged: string[] });
+
+type MoveComputation =
+  | { kind: "no_action" }
+  | { kind: "action"; action: CodeAction };
 
 async function moveFunction(input: MoveFunctionInput): Promise<MoveFunctionResult> {
   const { filePath, line, column, destinationFile } = input;
@@ -48,36 +55,43 @@ async function moveFunction(input: MoveFunctionInput): Promise<MoveFunctionResul
 
   // Gated on a quiescent project graph — the move rewrites importers, and
   // importers in an unloaded project are absent from the edit. See lifecycle.
-  const actions = (await lifecycle.runStable(() =>
-    lifecycle.client.request("textDocument/codeAction", {
+  // The codeAction request and the resolve that computes the edit share one
+  // callback, so a graph change between them invalidates both.
+  const stable = await lifecycle.runStable<MoveComputation>(async () => {
+    const actions = (await lifecycle.client.request("textDocument/codeAction", {
       textDocument: { uri: fileUri },
       range,
       context: { diagnostics: [], only: ["refactor.move"] },
-    }),
-    filePath,
-  )) as CodeAction[] | null;
+    })) as CodeAction[] | null;
 
-  if (!actions || actions.length === 0) {
+    if (!actions || actions.length === 0) return { kind: "no_action" };
+
+    let action = actions[0];
+
+    // Attempt codeAction/resolve with destination file (tsserver-language-server convention).
+    // Requires codeActionProvider.resolveProvider; falls back gracefully if unsupported.
+    if (!action.edit) {
+      try {
+        action = await lifecycle.client.request<CodeAction>("codeAction/resolve", {
+          ...action,
+          data: {
+            interactiveRefactorArguments: { targetFile: destinationUri },
+          },
+        });
+      } catch {
+        // Server does not support codeAction/resolve — proceed without destination
+      }
+    }
+    return { kind: "action", action };
+  }, { resyncPath: filePath });
+
+  if (!stable.complete) {
+    return { ...incompletePayload(stable), filesChanged: [] };
+  }
+  if (stable.value.kind === "no_action") {
     return { ok: false, filesChanged: [], code: "no_move_action" };
   }
-
-  let action = actions[0];
-
-  // Attempt codeAction/resolve with destination file (tsserver-language-server convention).
-  // Requires codeActionProvider.resolveProvider; falls back gracefully if unsupported.
-  if (!action.edit) {
-    try {
-      const resolved = (await lifecycle.client.request<CodeAction>("codeAction/resolve", {
-        ...action,
-        data: {
-          interactiveRefactorArguments: { targetFile: destinationUri },
-        },
-      }));
-      action = resolved;
-    } catch {
-      // Server does not support codeAction/resolve — proceed without destination
-    }
-  }
+  const action = stable.value.action;
 
   if (!action.edit) {
     return {
@@ -99,7 +113,8 @@ server.registerTool(
   "move_function",
   {
     description:
-      "Move a function to a different file via LSP codeAction (refactor.move). Experimental — fidelity varies by language backend.",
+      "Move a function to a different file via LSP codeAction (refactor.move). Experimental — fidelity varies by language backend." +
+        " When the project graph is not settled it refuses before editing and returns complete:false with a retryable code (project_loading or graph_changing), retryAfterMs, and filesChanged:[].",
     inputSchema: inputShape,
   },
   async (input) => {
