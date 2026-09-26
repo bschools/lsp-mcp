@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import ts from "typescript";
 
 export interface LingeringRefsOptions {
   workspaceRoot: string;
@@ -48,7 +49,7 @@ export function findLingeringReferences(opts: LingeringRefsOptions): string[] {
     try {
       const output = execFileSync(
         "git",
-        ["grep", "-l", "-P", pattern.source, "--", ":!node_modules", ":!dist", ":!build"],
+        ["grep", "-l", "--untracked", "-P", pattern.source, "--", ":!node_modules", ":!dist", ":!build"],
         { cwd: workspaceRoot, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
       );
       return output
@@ -121,4 +122,169 @@ function isGitRepo(dir: string): boolean {
 
 function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+const SOURCE_EXTENSIONS = new Set([".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"]);
+
+export type IdentifierCandidate = {
+  path: string;
+  /** 0-based, LSP-native. */
+  line: number;
+  /** 0-based, LSP-native. */
+  character: number;
+};
+
+export type InformationalMention = {
+  path: string;
+  /** 0-based, LSP-native. */
+  line: number;
+  kind: "string" | "template" | "comment";
+};
+
+export type ResidualCandidates = {
+  identifierCandidates: IdentifierCandidate[];
+  informationalMentions: InformationalMention[];
+};
+
+export type ResidualCandidatesOptions = {
+  workspaceRoot: string;
+  oldName: string;
+};
+
+/**
+ * Token-aware pass over the text-match paths (edited files included). Identifier
+ * tokens equal to oldName are candidates; occurrences inside string, template, or
+ * comment tokens are informational. Homonyms (property names etc.) stay candidates.
+ */
+export function findResidualCandidates(opts: ResidualCandidatesOptions): ResidualCandidates {
+  const { workspaceRoot, oldName } = opts;
+  const result: ResidualCandidates = { identifierCandidates: [], informationalMentions: [] };
+  const paths = findLingeringReferences({ workspaceRoot, oldName, excludePaths: [] }).filter((p) =>
+    SOURCE_EXTENSIONS.has(path.extname(p)),
+  );
+  const inner = new RegExp(`(?<![\\w$])${escapeRegex(oldName)}(?![\\w$])`, "g");
+
+  for (const file of paths) {
+    let text: string;
+    try {
+      if (fs.statSync(file).size > MAX_FILE_SIZE) continue;
+      text = fs.readFileSync(file, "utf8");
+    } catch {
+      continue;
+    }
+    const lineStarts = computeLineStarts(text);
+    const lineOf = (offset: number): number => {
+      let lo = 0;
+      let hi = lineStarts.length - 1;
+      while (lo < hi) {
+        const mid = (lo + hi + 1) >> 1;
+        if (lineStarts[mid] <= offset) lo = mid;
+        else hi = mid - 1;
+      }
+      return lo;
+    };
+    const mention = (
+      start: number,
+      tokenText: string,
+      kind: InformationalMention["kind"],
+    ): void => {
+      inner.lastIndex = 0;
+      for (let m = inner.exec(tokenText); m; m = inner.exec(tokenText)) {
+        result.informationalMentions.push({ path: file, line: lineOf(start + m.index), kind });
+      }
+    };
+
+    const jsx = /\.(tsx|jsx)$/.test(file);
+    const scanner = ts.createScanner(
+      ts.ScriptTarget.Latest,
+      false,
+      jsx ? ts.LanguageVariant.JSX : ts.LanguageVariant.Standard,
+      text,
+    );
+    const templateStack: boolean[] = []; // true = template substitution, false = plain brace
+    let prev: ts.SyntaxKind = ts.SyntaxKind.Unknown;
+    for (let kind = scanner.scan(); kind !== ts.SyntaxKind.EndOfFileToken; kind = scanner.scan()) {
+      if (kind === ts.SyntaxKind.CloseBraceToken && templateStack[templateStack.length - 1]) {
+        kind = scanner.reScanTemplateToken(false);
+        if (kind === ts.SyntaxKind.TemplateTail) templateStack.pop();
+      } else if (
+        (kind === ts.SyntaxKind.SlashToken || kind === ts.SyntaxKind.SlashEqualsToken) &&
+        !endsExpression(prev)
+      ) {
+        kind = scanner.reScanSlashToken();
+      }
+      const start = scanner.getTokenStart();
+      switch (kind) {
+        case ts.SyntaxKind.Identifier:
+          if (scanner.getTokenValue() === oldName) {
+            const line = lineOf(start);
+            result.identifierCandidates.push({
+              path: file,
+              line,
+              character: start - lineStarts[line],
+            });
+          }
+          break;
+        case ts.SyntaxKind.StringLiteral:
+        case ts.SyntaxKind.JsxText:
+          mention(start, scanner.getTokenText(), "string");
+          break;
+        case ts.SyntaxKind.NoSubstitutionTemplateLiteral:
+        case ts.SyntaxKind.TemplateMiddle:
+        case ts.SyntaxKind.TemplateTail:
+          mention(start, scanner.getTokenText(), "template");
+          break;
+        case ts.SyntaxKind.TemplateHead:
+          templateStack.push(true);
+          mention(start, scanner.getTokenText(), "template");
+          break;
+        case ts.SyntaxKind.SingleLineCommentTrivia:
+        case ts.SyntaxKind.MultiLineCommentTrivia:
+          mention(start, scanner.getTokenText(), "comment");
+          break;
+        case ts.SyntaxKind.OpenBraceToken:
+          templateStack.push(false);
+          break;
+        case ts.SyntaxKind.CloseBraceToken:
+          templateStack.pop();
+          break;
+      }
+      if (
+        kind !== ts.SyntaxKind.WhitespaceTrivia &&
+        kind !== ts.SyntaxKind.NewLineTrivia &&
+        kind !== ts.SyntaxKind.SingleLineCommentTrivia &&
+        kind !== ts.SyntaxKind.MultiLineCommentTrivia
+      ) {
+        prev = kind;
+      }
+    }
+  }
+  return result;
+}
+
+function endsExpression(kind: ts.SyntaxKind): boolean {
+  return (
+    kind === ts.SyntaxKind.Identifier ||
+    kind === ts.SyntaxKind.NumericLiteral ||
+    kind === ts.SyntaxKind.StringLiteral ||
+    kind === ts.SyntaxKind.RegularExpressionLiteral ||
+    kind === ts.SyntaxKind.NoSubstitutionTemplateLiteral ||
+    kind === ts.SyntaxKind.TemplateTail ||
+    kind === ts.SyntaxKind.CloseParenToken ||
+    kind === ts.SyntaxKind.CloseBracketToken ||
+    kind === ts.SyntaxKind.CloseBraceToken ||
+    kind === ts.SyntaxKind.ThisKeyword ||
+    kind === ts.SyntaxKind.SuperKeyword ||
+    kind === ts.SyntaxKind.TrueKeyword ||
+    kind === ts.SyntaxKind.FalseKeyword ||
+    kind === ts.SyntaxKind.NullKeyword
+  );
+}
+
+function computeLineStarts(text: string): number[] {
+  const starts = [0];
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === "\n") starts.push(i + 1);
+  }
+  return starts;
 }
