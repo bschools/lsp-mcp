@@ -305,9 +305,9 @@ export async function createLspLifecycle(
         getGeneration: () => projectGeneration,
         getActiveProjectLoads: () => activeProgress.size,
         resync: async () => {
-          // Resend the document before retrying: the failure is tsserver
-          // computing a position against a ScriptInfo whose text it does not
-          // actually hold, and a fresh didChange rebuilds it.
+          // Called before a Debug Failure retry: tsserver computed a position
+          // against a ScriptInfo whose text it does not hold; a fresh didChange
+          // rebuilds it.
           if (resyncPath) await didChange(resyncPath);
         },
         log: (line) => {
@@ -452,7 +452,9 @@ export async function runStableRequest<T>(
   }
 
   for (let attempt = 0; attempt < deps.maxAttempts; attempt++) {
-    const settled = await deps.waitForProjectLoad(deps.projectLoadTimeoutMs);
+    // One readiness budget spans every attempt, so a retry never restarts it.
+    const waitMs = Math.max(0, deps.projectLoadTimeoutMs - (deps.now() - startedAt));
+    const settled = await deps.waitForProjectLoad(waitMs);
     if (!settled) {
       return incomplete(
         "project_loading",

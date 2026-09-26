@@ -201,6 +201,10 @@ export function findResidualCandidates(opts: ResidualCandidatesOptions): Residua
       jsx ? ts.LanguageVariant.JSX : ts.LanguageVariant.Standard,
       text,
     );
+    // A bare scanner does not track JSX context: an apostrophe or backtick in
+    // JSX text would open a string or template that swallows real identifiers.
+    // The parser knows where JsxText runs; the scan skips over each one.
+    const jsxTextEnds = jsx ? collectJsxTextRanges(file, text) : new Map<number, number>();
     const templateStack: boolean[] = []; // true = template substitution, false = plain brace
     let prev: ts.SyntaxKind = ts.SyntaxKind.Unknown;
     for (let kind = scanner.scan(); kind !== ts.SyntaxKind.EndOfFileToken; kind = scanner.scan()) {
@@ -214,6 +218,13 @@ export function findResidualCandidates(opts: ResidualCandidatesOptions): Residua
         kind = scanner.reScanSlashToken();
       }
       const start = scanner.getTokenStart();
+      const jsxTextEnd = jsxTextEnds.get(start);
+      if (jsxTextEnd !== undefined) {
+        mention(start, text.slice(start, jsxTextEnd), "string");
+        scanner.resetTokenState(jsxTextEnd);
+        prev = ts.SyntaxKind.JsxText;
+        continue;
+      }
       switch (kind) {
         case ts.SyntaxKind.Identifier:
           if (scanner.getTokenValue() === oldName) {
@@ -260,6 +271,22 @@ export function findResidualCandidates(opts: ResidualCandidatesOptions): Residua
     }
   }
   return result;
+}
+
+/** Start offset -> end offset of every non-empty JsxText node in the file. */
+function collectJsxTextRanges(file: string, text: string): Map<number, number> {
+  const kind = file.endsWith(".jsx") ? ts.ScriptKind.JSX : ts.ScriptKind.TSX;
+  const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, false, kind);
+  const ranges = new Map<number, number>();
+  const visit = (node: ts.Node): void => {
+    if (ts.isJsxText(node)) {
+      if (node.end > node.pos) ranges.set(node.pos, node.end);
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return ranges;
 }
 
 function endsExpression(kind: ts.SyntaxKind): boolean {

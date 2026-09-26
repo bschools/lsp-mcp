@@ -33,11 +33,29 @@ describe("runStableRequest", () => {
     expect(fn).not.toHaveBeenCalled();
   });
 
-  it("passes the per-call projectLoadTimeoutMs to the readiness wait", async () => {
+  it("passes the per-call projectLoadTimeoutMs, less elapsed time, to the readiness wait", async () => {
     const wait = vi.fn(async () => false);
     const { deps } = makeDeps({ waitForProjectLoad: wait, projectLoadTimeoutMs: 1234 });
     await runStableRequest(deps, async () => "x");
-    expect(wait).toHaveBeenCalledWith(1234);
+    expect(wait).toHaveBeenCalledWith(1224);
+  });
+
+  it("shares one readiness budget across retries instead of restarting it", async () => {
+    let clock = 0;
+    let gen = 0;
+    const wait = vi.fn(async () => true);
+    const { deps } = makeDeps({
+      waitForProjectLoad: wait,
+      projectLoadTimeoutMs: 1000,
+      now: () => clock,
+      getGeneration: () => gen,
+    });
+    await runStableRequest(deps, async () => {
+      clock += 400;
+      gen += 1;
+      return "x";
+    });
+    expect(wait.mock.calls.map(([ms]) => ms)).toEqual([1000, 600, 200]);
   });
 
   it("returns graph_changing when the generation moves on every attempt", async () => {

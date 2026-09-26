@@ -64,8 +64,8 @@ const TIMED_OUT = Symbol("timed_out");
 /**
  * Post-edit semantic pass over residual identifier candidates. Each candidate
  * is classified from its definition and, when the definition is empty or is the
- * candidate itself, from the file's fresh diagnostics. No syntax allowlist decides a class. A deadline or
- * an unsettled graph leaves unclassified candidates `unclassifiable` and marks
+ * candidate itself, from the file's fresh diagnostics. A deadline or an
+ * unsettled graph leaves unclassified candidates `unclassifiable` and marks
  * the result incomplete; it never reports verified on a truncated set.
  */
 export async function verifyResidualCandidates(opts: VerifyResidualOptions): Promise<VerifyResult> {

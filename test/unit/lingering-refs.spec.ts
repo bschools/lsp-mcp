@@ -51,6 +51,24 @@ describe("findResidualCandidates", () => {
     expect(identifierCandidates).toEqual([{ path: edited, line: 1, character: 12 }]);
   });
 
+  it("keeps an identifier after an apostrophe or backtick in JSX text as a candidate", () => {
+    const file = write(
+      "view.tsx",
+      "export const a = <p>Don't {oldThing}</p>;\nexport const b = <p>`tick {oldThing}</p>;\n",
+    );
+    execFileSync("git", ["add", "."], { cwd: root });
+
+    const { identifierCandidates, informationalMentions } = findResidualCandidates({
+      workspaceRoot: root,
+      oldName: "oldThing",
+    });
+    expect(identifierCandidates).toEqual([
+      { path: file, line: 0, character: 27 },
+      { path: file, line: 1, character: 27 },
+    ]);
+    expect(informationalMentions).toEqual([]);
+  });
+
   it("treats string, template, and comment occurrences as informational only", () => {
     const file = write(
       "info.ts",
