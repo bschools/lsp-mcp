@@ -383,4 +383,16 @@ describe("rename_symbol semantic verification", () => {
     expect(result.unclassifiedCandidates).toHaveLength(55);
     expect(result.lingeringReferences).toHaveLength(5);
   }, 60000);
+
+  it("returns time_budget when discovery exhausts the whole-pass budget", async () => {
+    const result = await renameIn({ env: { LSP_MCP_VERIFY_BUDGET_MS: "0" } });
+
+    expect(result).toMatchObject({
+      ok: false,
+      applied: true,
+      verified: false,
+      code: "rename_unverified",
+      verificationIncomplete: { reason: "time_budget" },
+    });
+  }, 60000);
 });

@@ -7,6 +7,7 @@ import { applyWorkspaceEdit, TextEdit, WorkspaceEdit } from "../workspace/edit-a
 import {
   findLingeringReferences,
   findResidualCandidates,
+  ResidualDiscoveryDeadlineExceeded,
   type IdentifierCandidate,
   type InformationalMention,
 } from "../verify/lingering-refs.js";
@@ -204,36 +205,51 @@ async function renameSymbol(input: {
     };
   }
 
-  // Raw text-match list; informational only, never decides verified/ok.
-  const lingeringReferences = findLingeringReferences({
-    workspaceRoot,
-    oldName,
-    excludePaths: filesChanged,
-  });
-  const { identifierCandidates, informationalMentions } = findResidualCandidates({ workspaceRoot, oldName });
-
+  const verificationStartedAt = Date.now();
+  const budgetMs = numberEnv("LSP_MCP_VERIFY_BUDGET_MS", VERIFY_BUDGET_MS);
+  const maxCandidates = numberEnv("LSP_MCP_VERIFY_MAX_CANDIDATES", VERIFY_MAX_CANDIDATES);
+  const deadlineMs = verificationStartedAt + budgetMs;
+  let lingeringReferences: string[] = [];
+  let identifierCandidates: IdentifierCandidate[] = [];
+  let informationalMentions: InformationalMention[] = [];
   let verification: Awaited<ReturnType<typeof verifyResidualCandidates>>;
   try {
-    const budgetMs = numberEnv("LSP_MCP_VERIFY_BUDGET_MS", VERIFY_BUDGET_MS);
-    const maxCandidates = numberEnv("LSP_MCP_VERIFY_MAX_CANDIDATES", VERIFY_MAX_CANDIDATES);
+    // Raw text matches are advisory; the same deadline covers both discovery passes.
+    lingeringReferences = findLingeringReferences({
+      workspaceRoot,
+      oldName,
+      excludePaths: filesChanged,
+      deadlineMs,
+    });
+    ({ identifierCandidates, informationalMentions } = findResidualCandidates({
+      workspaceRoot,
+      oldName,
+      deadlineMs,
+    }));
     verification = await verifyResidualCandidates({
       candidates: identifierCandidates,
       renamedDeclaration: renamedDeclarationAt(edit, filePath, position),
       deps: verifyDeps(lifecycle),
-      budget: { deadlineMs: Date.now() + budgetMs, maxCandidates },
+      budget: { deadlineMs, maxCandidates },
     });
   } catch (err) {
+    const timedOut = err instanceof ResidualDiscoveryDeadlineExceeded;
     return {
       ...applied,
       ok: false,
       verified: false,
+      ...(timedOut && {
+        verificationIncomplete: { reason: "time_budget" as const, elapsedMs: Date.now() - verificationStartedAt },
+      }),
       unclassifiedCandidates: identifierCandidates,
       informationalMentions,
       lingeringReferences,
       code: "rename_unverified",
-      hint:
-        `Verification failed with an error (${err instanceof Error ? err.message : String(err)}). ` +
-        `The edits in filesChanged are already on disk; review or revert them before retrying.`,
+      hint: timedOut
+        ? `Verification discovery exceeded its ${budgetMs}ms time budget; undiscovered candidates are unknown. ` +
+          `The edits in filesChanged are already on disk; review or revert them before retrying.`
+        : `Verification failed with an error (${err instanceof Error ? err.message : String(err)}). ` +
+          `The edits in filesChanged are already on disk; review or revert them before retrying.`,
     };
   }
 

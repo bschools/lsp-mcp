@@ -354,6 +354,22 @@ describe("verifyResidualCandidates stable window", () => {
 });
 
 describe("verifyResidualCandidates budgets", () => {
+  it("does not verify an empty candidate set after the deadline", async () => {
+    const { deps } = makeDeps();
+    const result = await verifyResidualCandidates({
+      candidates: [],
+      renamedDeclaration: DECL,
+      deps,
+      budget: budget(0),
+    });
+
+    expect(result).toEqual({
+      verified: false,
+      classified: [],
+      incomplete: { reason: "time_budget", elapsedMs: 0 },
+    });
+  });
+
   it("returns candidate_budget without opening anything past maxCandidates", async () => {
     const candidates = [0, 1, 2].map((line) => cand("/ws/a.ts", line, 0));
     const { deps, events } = makeDeps();

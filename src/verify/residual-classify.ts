@@ -86,6 +86,7 @@ export async function verifyResidualCandidates(opts: VerifyResidualOptions): Pro
     elapsedMs: deps.now() - startedAt,
   });
 
+  if (remaining() <= 0) return finish(timeBudget());
   if (candidates.length === 0) return finish();
   if (candidates.length > budget.maxCandidates) {
     return finish({

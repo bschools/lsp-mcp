@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   findLingeringReferences,
   findResidualCandidates,
+  ResidualDiscoveryDeadlineExceeded,
 } from "../../src/verify/lingering-refs.js";
 
 let root: string;
@@ -40,6 +41,37 @@ describe("untracked sources", () => {
 });
 
 describe("findResidualCandidates", () => {
+  it("fails closed when the discovery deadline has expired", () => {
+    expect(() =>
+      findResidualCandidates({ workspaceRoot: root, oldName: "oldThing", deadlineMs: Date.now() - 1 }),
+    ).toThrow(ResidualDiscoveryDeadlineExceeded);
+  });
+
+  it("finds identifiers beginning with a dollar sign", () => {
+    const file = write("dollar.ts", "const $old = 1;\nvoid $old;\n");
+    execFileSync("git", ["add", "."], { cwd: root });
+
+    expect(findLingeringReferences({ workspaceRoot: root, oldName: "$old", excludePaths: [] })).toContain(file);
+    expect(findResidualCandidates({ workspaceRoot: root, oldName: "$old" }).identifierCandidates).toEqual([
+      { path: file, line: 0, character: 6 },
+      { path: file, line: 1, character: 5 },
+    ]);
+  });
+
+  it("examines source files larger than one megabyte", () => {
+    const file = write("large.ts", `const oldThing = 1;\n/*${"x".repeat(1_000_030)}*/\n`);
+    execFileSync("git", ["add", "."], { cwd: root });
+
+    expect(findResidualCandidates({ workspaceRoot: root, oldName: "oldThing" }).identifierCandidates).toEqual([
+      { path: file, line: 0, character: 6 },
+    ]);
+
+    fs.rmSync(path.join(root, ".git"), { recursive: true, force: true });
+    expect(findResidualCandidates({ workspaceRoot: root, oldName: "oldThing" }).identifierCandidates).toEqual([
+      { path: file, line: 0, character: 6 },
+    ]);
+  });
+
   it("reports identifiers in edited files as candidates with positions", () => {
     const edited = write("edited.ts", "const x = 1;\nconsole.log(oldThing);\n");
     execFileSync("git", ["add", "."], { cwd: root });
