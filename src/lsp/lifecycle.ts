@@ -22,6 +22,7 @@ export interface LspLifecycle {
   didOpen(filePath: string): Promise<void>;
   didChange(filePath: string): Promise<void>;
   didClose(filePath: string): Promise<void>;
+  isOpen(filePath: string): boolean;
   ensureFile(filePath: string): Promise<void>;
   waitForDiagnostics(uri: string, timeoutMs?: number): Promise<Diagnostic[]>;
   /** Resolves once no project load has been in flight for the settle window. Returns false on timeout. */
@@ -243,6 +244,10 @@ export async function createLspLifecycle(
     client.notify("textDocument/didClose", { textDocument: { uri: fileUri } });
   }
 
+  function isOpen(filePath: string): boolean {
+    return openFiles.has(url.pathToFileURL(filePath).href);
+  }
+
   async function ensureFile(filePath: string): Promise<void> {
     await didOpen(filePath);
   }
@@ -347,7 +352,7 @@ export async function createLspLifecycle(
     proc.kill();
   }
 
-  return { client, diagnosticsByUri, shutdown, didOpen, didChange, didClose, ensureFile, waitForDiagnostics, waitForProjectLoad, runStable };
+  return { client, diagnosticsByUri, shutdown, didOpen, didChange, didClose, isOpen, ensureFile, waitForDiagnostics, waitForProjectLoad, runStable };
 }
 
 /**
@@ -358,7 +363,7 @@ export async function createLspLifecycle(
  * reinstates the exact under-reporting this module exists to prevent, so a bad
  * value is announced and ignored rather than honoured.
  */
-function numberEnv(name: string, fallback: number): number {
+export function numberEnv(name: string, fallback: number): number {
   const raw = process.env[name];
   if (raw === undefined) return fallback;
   const parsed = Number(raw);
