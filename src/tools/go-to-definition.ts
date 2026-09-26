@@ -30,7 +30,9 @@ interface DefinitionLocation {
 server.registerTool(
   "go_to_definition",
   {
-    description: "Jump to the definition of a symbol at a position via LSP.",
+    description:
+      "Jump to the definition of a symbol at a position via LSP." +
+      " When the project graph is not settled it returns complete:false with a retryable code (project_loading or graph_changing) and retryAfterMs instead of a partial answer.",
     inputSchema: inputShape,
   },
   async (input) => {

@@ -74,7 +74,8 @@ server.registerTool(
   "find_references",
   {
     description:
-      "Find all references to a symbol across the workspace via LSP. Returns files grouped with their reference ranges.",
+      "Find all references to a symbol across the workspace via LSP. Returns files grouped with their reference ranges." +
+        " When the project graph is not settled it returns complete:false with a retryable code (project_loading or graph_changing) and retryAfterMs instead of a partial answer.",
     inputSchema: inputShape,
   },
   async (input) => {

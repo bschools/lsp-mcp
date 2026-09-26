@@ -394,8 +394,10 @@ server.registerTool(
     description:
       "Rename a symbol project-wide via LSP. Applies the WorkspaceEdit to disk, then semantically verifies " +
       "the old name no longer resolves anywhere (bounded by LSP_MCP_VERIFY_BUDGET_MS / LSP_MCP_VERIFY_MAX_CANDIDATES). " +
-      "applied:true with verified:false (code rename_unverified) means the edits are on disk but residuals or " +
-      "unclassified candidates remain.",
+      "applied:true with verified:false (code rename_unverified) means the edits are on disk but confirmedResiduals or " +
+      "unclassifiedCandidates remain, or verificationIncomplete names the budget or readiness reason. " +
+      "homonyms, informationalMentions, and the raw lingeringReferences list do not affect verified." +
+      " When the project graph is not settled it refuses before editing and returns complete:false with a retryable code (project_loading or graph_changing), retryAfterMs, and filesChanged:[].",
     inputSchema: inputShape,
   },
   async (input) => {

@@ -113,7 +113,8 @@ server.registerTool(
   "move_function",
   {
     description:
-      "Move a function to a different file via LSP codeAction (refactor.move). Experimental — fidelity varies by language backend.",
+      "Move a function to a different file via LSP codeAction (refactor.move). Experimental — fidelity varies by language backend." +
+        " When the project graph is not settled it refuses before editing and returns complete:false with a retryable code (project_loading or graph_changing), retryAfterMs, and filesChanged:[].",
     inputSchema: inputShape,
   },
   async (input) => {

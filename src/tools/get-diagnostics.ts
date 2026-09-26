@@ -13,7 +13,10 @@ const inputShape = {
 server.registerTool(
   "get_diagnostics",
   {
-    description: "Get TypeScript diagnostics (errors, warnings) for a file via LSP.",
+    description:
+      "Get TypeScript diagnostics (errors, warnings) for a file via LSP." +
+      " When the project graph is not settled it returns complete:false with a retryable code (project_loading or graph_changing) and retryAfterMs instead of a partial answer." +
+      " timeoutMs separately bounds the wait for the diagnostic notification; an empty list after that wait is not proof of zero diagnostics.",
     inputSchema: inputShape,
   },
   async (input) => {

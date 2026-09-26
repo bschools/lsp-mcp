@@ -100,7 +100,9 @@ server.registerTool(
   "rename_file",
   {
     description:
-      "Rename a file and update all import specifiers via LSP workspace/willRenameFiles.",
+      "Rename a file and update import specifiers via LSP workspace/willRenameFiles." +
+        " When the project graph is not settled it refuses before editing and returns complete:false with a retryable code (project_loading or graph_changing), retryAfterMs, and filesChanged:[]." +
+        " lingeringReferences (tracked and untracked files) is an advisory text match, not a verification that every import was rewritten.",
     inputSchema: inputShape,
   },
   async (input) => {
