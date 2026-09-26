@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { getOrCreateClient } from "../lsp/factory.js";
+import { incompletePayload } from "../lsp/lifecycle.js";
 import { detectWorkspaceRoot } from "../workspace/detect.js";
 import { server } from "../server.js";
 import * as url from "node:url";
@@ -33,10 +34,17 @@ server.registerTool(
     // finds a non-empty entry, so a retry over a live cache hands back the
     // same phantom set it was retrying to escape. Dropping the entry forces
     // the wait to block on a fresh publish from the now-loaded project.
-    const diagnostics = await lifecycle.runStable(() => {
+    const stable = await lifecycle.runStable(() => {
       lifecycle.diagnosticsByUri.delete(fileUri);
       return lifecycle.waitForDiagnostics(fileUri, timeoutMs);
-    }, filePath);
+    }, { resyncPath: filePath });
+    if (!stable.complete) {
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify(incompletePayload(stable), null, 2) }],
+        isError: true,
+      };
+    }
+    const diagnostics = stable.value;
 
     return {
       content: [{ type: "text", text: JSON.stringify({ filePath, diagnostics }, null, 2) }],

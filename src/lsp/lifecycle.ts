@@ -26,9 +26,11 @@ export interface LspLifecycle {
   waitForDiagnostics(uri: string, timeoutMs?: number): Promise<Diagnostic[]>;
   /** Resolves once no project load has been in flight for the settle window. Returns false on timeout. */
   waitForProjectLoad(timeoutMs?: number): Promise<boolean>;
-  /** Runs a semantic request against a quiescent project graph, re-issuing it once if a load starts mid-flight. */
-  runStable<T>(fn: () => Promise<T>, resyncPath?: string): Promise<T>;
+  /** Runs a semantic request against a quiescent project graph; returns a typed incomplete instead of a partial result. */
+  runStable<T>(fn: () => Promise<T>, options?: RunStableOptions): Promise<StableResult<T>>;
 }
+
+export type RunStableOptions = { resyncPath?: string; projectLoadTimeoutMs?: number };
 
 type OpenFileInfo = { version: number; mtimeMs: number };
 
@@ -283,57 +285,40 @@ export async function createLspLifecycle(
     return false;
   }
 
-  async function runStable<T>(
+  function runStable<T>(
     fn: () => Promise<T>,
-    resyncPath?: string,
-  ): Promise<T> {
-    // Two retries beyond the first attempt. Two distinct transients are being
-    // absorbed:
-    //   1. A project load that starts while the request is in flight — the
-    //      answer was computed against a graph that changed underneath it.
-    //   2. `Debug Failure. False expression.` out of tsserver's
-    //      computePositionOfLineAndCharacter, which is what a position request
-    //      gets when the server has not finished taking up the didOpen for
-    //      that document yet. Retrying after a beat is the documented-by-
-    //      practice remedy (rename_symbol has carried its own evict-and-retry
-    //      for this for as long as it has existed).
-    const MAX_ATTEMPTS = 3;
-    const SETTLE_RETRY_MS = 250;
-    let result!: T;
-
-    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-      const settled = await waitForProjectLoad();
-      if (!settled) {
-        process.stderr.write(
-          `[lsp-mcp] project graph still loading after ${PROJECT_LOAD_TIMEOUT_MS}ms; ` +
-            `answering from a partial graph (result may under-report)\n`,
-        );
-      }
-      const before = projectGeneration;
-      try {
-        result = await fn();
-      } catch (err) {
-        const message = (err as { message?: string })?.message ?? "";
-        if (!/Debug Failure/i.test(message) || attempt === MAX_ATTEMPTS - 1) {
-          throw err;
-        }
-        // Resend the document before retrying: the failure is tsserver
-        // computing a position against a ScriptInfo whose text it does not
-        // actually hold, and a fresh didChange rebuilds it.
-        if (resyncPath) await didChange(resyncPath);
-        await new Promise((r) => setTimeout(r, SETTLE_RETRY_MS));
-        continue;
-      }
-      if (projectGeneration === before) return result;
-    }
-    // Attempts exhausted with the graph still churning. The result stands (a
-    // partial answer beats no answer) but it is exactly the silent-truncation
-    // shape this module exists to close, so it does not leave unannounced.
-    process.stderr.write(
-      `[lsp-mcp] project graph changed under ${MAX_ATTEMPTS} consecutive attempts; ` +
-        `returning the last result (may under-report)\n`,
+    options: RunStableOptions = {},
+  ): Promise<StableResult<T>> {
+    const { resyncPath, projectLoadTimeoutMs } = options;
+    return runStableRequest(
+      {
+        waitForProjectLoad,
+        getGeneration: () => projectGeneration,
+        getActiveProjectLoads: () => activeProgress.size,
+        resync: async () => {
+          // Resend the document before retrying: the failure is tsserver
+          // computing a position against a ScriptInfo whose text it does not
+          // actually hold, and a fresh didChange rebuilds it.
+          if (resyncPath) await didChange(resyncPath);
+        },
+        log: (line) => {
+          try {
+            logStream.write(`${line}\n`);
+          } catch {
+            // logging must never throw
+          }
+        },
+        now: Date.now,
+        maxAttempts: 3,
+        settleRetryMs: 250,
+        projectLoadTimeoutMs: Math.min(
+          projectLoadTimeoutMs ?? PROJECT_LOAD_TIMEOUT_MS,
+          PROJECT_LOAD_TIMEOUT_MS,
+        ),
+        settleMs: PROJECT_SETTLE_MS,
+      },
+      fn,
     );
-    return result;
   }
 
   async function shutdown(): Promise<void> {

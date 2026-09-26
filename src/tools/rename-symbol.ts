@@ -1,6 +1,7 @@
 import { z } from "zod";
 import * as fs from "node:fs";
 import { evictClient, getOrCreateClient } from "../lsp/factory.js";
+import { incompletePayload } from "../lsp/lifecycle.js";
 import { detectWorkspaceRoot } from "../workspace/detect.js";
 import { applyWorkspaceEdit, WorkspaceEdit } from "../workspace/edit-apply.js";
 import { findLingeringReferences } from "../verify/lingering-refs.js";
@@ -24,12 +25,19 @@ interface RenameResult {
   hint?: string;
 }
 
+type IncompleteRename = ReturnType<typeof incompletePayload> & {
+  filesChanged: string[];
+  lingeringReferences: string[];
+  oldName?: string;
+  retried?: boolean;
+};
+
 async function renameSymbol(input: {
   filePath: string;
   line: number;
   column: number;
   newName: string;
-}): Promise<RenameResult> {
+}): Promise<RenameResult | IncompleteRename> {
   const { filePath, line, column, newName } = input;
   const workspaceRoot = detectWorkspaceRoot(filePath);
   let lifecycle = await getOrCreateClient(workspaceRoot);
@@ -88,22 +96,22 @@ async function renameSymbol(input: {
   // Gated on a quiescent project graph — a rename computed mid-load rewrites
   // only the call sites tsserver happens to know about, leaving the rest
   // dangling. See the project-load readiness block in lsp/lifecycle.ts.
-  const performRename = async (): Promise<WorkspaceEdit | null> => {
-    return (await lifecycle.runStable(() =>
+  const performRename = async () => {
+    return await lifecycle.runStable(() =>
       lifecycle.client.request("textDocument/rename", {
         textDocument: { uri: fileUri },
         position,
         newName,
       }),
-      filePath,
-    )) as WorkspaceEdit | null;
+      { resyncPath: filePath },
+    );
   };
 
-  let edit: WorkspaceEdit | null;
+  let stable: Awaited<ReturnType<typeof performRename>>;
   let retried = false;
 
   try {
-    edit = await performRename();
+    stable = await performRename();
   } catch (err) {
     const message = (err as { message?: string })?.message ?? "";
     if (/Debug Failure/i.test(message)) {
@@ -112,7 +120,7 @@ async function renameSymbol(input: {
       lifecycle = await getOrCreateClient(workspaceRoot);
       await lifecycle.ensureFile(filePath);
       try {
-        edit = await performRename();
+        stable = await performRename();
       } catch {
         return {
           ok: false,
@@ -128,6 +136,17 @@ async function renameSymbol(input: {
       throw err;
     }
   }
+
+  if (!stable.complete) {
+    return {
+      ...incompletePayload(stable),
+      filesChanged: [],
+      lingeringReferences: [],
+      oldName,
+      retried,
+    };
+  }
+  const edit = stable.value as WorkspaceEdit | null;
 
   if (!edit) {
     return {

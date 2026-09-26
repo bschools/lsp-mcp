@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { getOrCreateClient } from "../lsp/factory.js";
+import { incompletePayload, type StableResult } from "../lsp/lifecycle.js";
 import { detectWorkspaceRoot } from "../workspace/detect.js";
 import { server } from "../server.js";
 import * as url from "node:url";
@@ -34,7 +35,7 @@ async function findReferences(input: {
   line: number;
   column: number;
   includeDeclaration?: boolean;
-}): Promise<{ files: FileReferences[] }> {
+}): Promise<{ files: FileReferences[] } | Extract<StableResult<unknown>, { complete: false }>> {
   const { filePath, line, column, includeDeclaration = true } = input;
   const workspaceRoot = detectWorkspaceRoot(filePath);
   const lifecycle = await getOrCreateClient(workspaceRoot);
@@ -45,14 +46,16 @@ async function findReferences(input: {
   // Gated on a quiescent project graph: tsserver answers references from a
   // partially-loaded graph without saying so, which silently under-reports
   // callers. See the project-load readiness block in lsp/lifecycle.ts.
-  const locations = ((await lifecycle.runStable(() =>
+  const stable = await lifecycle.runStable(() =>
     lifecycle.client.request("textDocument/references", {
       textDocument: { uri: fileUri },
       position: { line, character: column },
       context: { includeDeclaration },
     }),
-    filePath,
-  )) ?? []) as Location[];
+    { resyncPath: filePath },
+  );
+  if (!stable.complete) return stable;
+  const locations = (stable.value ?? []) as Location[];
 
   const grouped = new Map<string, Range[]>();
   for (const loc of locations) {
@@ -76,6 +79,12 @@ server.registerTool(
   },
   async (input) => {
     const result = await findReferences(input);
+    if ("complete" in result) {
+      return {
+        content: [{ type: "text", text: JSON.stringify(incompletePayload(result), null, 2) }],
+        isError: true,
+      };
+    }
     return {
       content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
     };

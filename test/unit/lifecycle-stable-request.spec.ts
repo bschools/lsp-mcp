@@ -7,7 +7,7 @@ import {
 
 function makeDeps(overrides: Partial<StableRequestDeps> = {}) {
   let clock = 0;
-  const log = vi.fn((_line: string) => {});
+  const log = vi.fn<[string], void>(() => {});
   const deps: StableRequestDeps = {
     waitForProjectLoad: vi.fn(async () => true),
     getGeneration: () => 0,

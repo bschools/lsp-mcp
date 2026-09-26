@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { getOrCreateClient } from "../lsp/factory.js";
+import { incompletePayload } from "../lsp/lifecycle.js";
 import { detectWorkspaceRoot } from "../workspace/detect.js";
 import { server } from "../server.js";
 import * as url from "node:url";
@@ -42,13 +43,20 @@ server.registerTool(
 
     // Gated on a quiescent project graph — a definition in a project tsserver
     // has not loaded yet resolves to nothing. See lsp/lifecycle.ts.
-    const raw = (await lifecycle.runStable(() =>
+    const stable = await lifecycle.runStable(() =>
       lifecycle.client.request("textDocument/definition", {
         textDocument: { uri: fileUri },
         position: { line, character: column },
       }),
-      filePath,
-    )) as Location | Location[] | null;
+      { resyncPath: filePath },
+    );
+    if (!stable.complete) {
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify(incompletePayload(stable), null, 2) }],
+        isError: true,
+      };
+    }
+    const raw = stable.value as Location | Location[] | null;
 
     const locations: Location[] = raw === null ? [] : Array.isArray(raw) ? raw : [raw];
     const definitions: DefinitionLocation[] = locations.map((loc) => ({
