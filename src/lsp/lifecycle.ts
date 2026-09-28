@@ -22,13 +22,16 @@ export interface LspLifecycle {
   didOpen(filePath: string): Promise<void>;
   didChange(filePath: string): Promise<void>;
   didClose(filePath: string): Promise<void>;
+  isOpen(filePath: string): boolean;
   ensureFile(filePath: string): Promise<void>;
   waitForDiagnostics(uri: string, timeoutMs?: number): Promise<Diagnostic[]>;
   /** Resolves once no project load has been in flight for the settle window. Returns false on timeout. */
   waitForProjectLoad(timeoutMs?: number): Promise<boolean>;
-  /** Runs a semantic request against a quiescent project graph, re-issuing it once if a load starts mid-flight. */
-  runStable<T>(fn: () => Promise<T>, resyncPath?: string): Promise<T>;
+  /** Runs a semantic request against a quiescent project graph; returns a typed incomplete instead of a partial result. */
+  runStable<T>(fn: () => Promise<T>, options?: RunStableOptions): Promise<StableResult<T>>;
 }
+
+export type RunStableOptions = { resyncPath?: string; projectLoadTimeoutMs?: number };
 
 type OpenFileInfo = { version: number; mtimeMs: number };
 
@@ -104,6 +107,10 @@ export async function createLspLifecycle(
         rename: { prepareSupport: true },
         references: {},
         codeAction: { codeActionLiteralSupport: { codeActionKind: { valueSet: [] } } },
+        // typescript-language-server publishes no diagnostics to a client that
+        // does not advertise this; get_diagnostics and rename verification
+        // would otherwise wait out their timeouts on an empty map.
+        publishDiagnostics: {},
       },
       workspace: {
         applyEdit: true,
@@ -241,6 +248,10 @@ export async function createLspLifecycle(
     client.notify("textDocument/didClose", { textDocument: { uri: fileUri } });
   }
 
+  function isOpen(filePath: string): boolean {
+    return openFiles.has(url.pathToFileURL(filePath).href);
+  }
+
   async function ensureFile(filePath: string): Promise<void> {
     await didOpen(filePath);
   }
@@ -283,57 +294,40 @@ export async function createLspLifecycle(
     return false;
   }
 
-  async function runStable<T>(
+  function runStable<T>(
     fn: () => Promise<T>,
-    resyncPath?: string,
-  ): Promise<T> {
-    // Two retries beyond the first attempt. Two distinct transients are being
-    // absorbed:
-    //   1. A project load that starts while the request is in flight — the
-    //      answer was computed against a graph that changed underneath it.
-    //   2. `Debug Failure. False expression.` out of tsserver's
-    //      computePositionOfLineAndCharacter, which is what a position request
-    //      gets when the server has not finished taking up the didOpen for
-    //      that document yet. Retrying after a beat is the documented-by-
-    //      practice remedy (rename_symbol has carried its own evict-and-retry
-    //      for this for as long as it has existed).
-    const MAX_ATTEMPTS = 3;
-    const SETTLE_RETRY_MS = 250;
-    let result!: T;
-
-    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-      const settled = await waitForProjectLoad();
-      if (!settled) {
-        process.stderr.write(
-          `[lsp-mcp] project graph still loading after ${PROJECT_LOAD_TIMEOUT_MS}ms; ` +
-            `answering from a partial graph (result may under-report)\n`,
-        );
-      }
-      const before = projectGeneration;
-      try {
-        result = await fn();
-      } catch (err) {
-        const message = (err as { message?: string })?.message ?? "";
-        if (!/Debug Failure/i.test(message) || attempt === MAX_ATTEMPTS - 1) {
-          throw err;
-        }
-        // Resend the document before retrying: the failure is tsserver
-        // computing a position against a ScriptInfo whose text it does not
-        // actually hold, and a fresh didChange rebuilds it.
-        if (resyncPath) await didChange(resyncPath);
-        await new Promise((r) => setTimeout(r, SETTLE_RETRY_MS));
-        continue;
-      }
-      if (projectGeneration === before) return result;
-    }
-    // Attempts exhausted with the graph still churning. The result stands (a
-    // partial answer beats no answer) but it is exactly the silent-truncation
-    // shape this module exists to close, so it does not leave unannounced.
-    process.stderr.write(
-      `[lsp-mcp] project graph changed under ${MAX_ATTEMPTS} consecutive attempts; ` +
-        `returning the last result (may under-report)\n`,
+    options: RunStableOptions = {},
+  ): Promise<StableResult<T>> {
+    const { resyncPath, projectLoadTimeoutMs } = options;
+    return runStableRequest(
+      {
+        waitForProjectLoad,
+        getGeneration: () => projectGeneration,
+        getActiveProjectLoads: () => activeProgress.size,
+        resync: async () => {
+          // Called before a Debug Failure retry: tsserver computed a position
+          // against a ScriptInfo whose text it does not hold; a fresh didChange
+          // rebuilds it.
+          if (resyncPath) await didChange(resyncPath);
+        },
+        log: (line) => {
+          try {
+            logStream.write(`${line}\n`);
+          } catch {
+            // logging must never throw
+          }
+        },
+        now: Date.now,
+        maxAttempts: 3,
+        settleRetryMs: 250,
+        projectLoadTimeoutMs: Math.min(
+          projectLoadTimeoutMs ?? PROJECT_LOAD_TIMEOUT_MS,
+          PROJECT_LOAD_TIMEOUT_MS,
+        ),
+        settleMs: PROJECT_SETTLE_MS,
+      },
+      fn,
     );
-    return result;
   }
 
   async function shutdown(): Promise<void> {
@@ -362,7 +356,7 @@ export async function createLspLifecycle(
     proc.kill();
   }
 
-  return { client, diagnosticsByUri, shutdown, didOpen, didChange, didClose, ensureFile, waitForDiagnostics, waitForProjectLoad, runStable };
+  return { client, diagnosticsByUri, shutdown, didOpen, didChange, didClose, isOpen, ensureFile, waitForDiagnostics, waitForProjectLoad, runStable };
 }
 
 /**
@@ -373,7 +367,7 @@ export async function createLspLifecycle(
  * reinstates the exact under-reporting this module exists to prevent, so a bad
  * value is announced and ignored rather than honoured.
  */
-function numberEnv(name: string, fallback: number): number {
+export function numberEnv(name: string, fallback: number): number {
   const raw = process.env[name];
   if (raw === undefined) return fallback;
   const parsed = Number(raw);
@@ -398,6 +392,114 @@ const PROJECT_LOAD_TIMEOUT_MS = numberEnv(
   "LSP_MCP_PROJECT_LOAD_TIMEOUT_MS",
   60_000,
 );
+
+export type IncompleteCode = "project_loading" | "graph_changing";
+
+export type StableResult<T> =
+  | { complete: true; value: T }
+  | {
+      complete: false;
+      code: IncompleteCode;
+      retryable: true;
+      retryAfterMs: number;
+      elapsedMs: number;
+      attempts: number;
+      activeProjectLoads: number;
+      message: string;
+    };
+
+export type StableRequestDeps = {
+  waitForProjectLoad: (timeoutMs: number) => Promise<boolean>;
+  getGeneration: () => number;
+  getActiveProjectLoads: () => number;
+  resync: () => Promise<void>;
+  log: (line: string) => void;
+  now: () => number;
+  maxAttempts: number;
+  settleRetryMs: number;
+  projectLoadTimeoutMs: number;
+  settleMs: number;
+};
+
+/**
+ * Runs `fn` against a quiescent project graph. `fn` may issue several LSP
+ * requests; the generation compare covers the whole callback. Never returns a
+ * partial result: an unsettled or churning graph yields a typed incomplete.
+ */
+export async function runStableRequest<T>(
+  deps: StableRequestDeps,
+  fn: () => Promise<T>,
+): Promise<StableResult<T>> {
+  const startedAt = deps.now();
+
+  function incomplete(code: IncompleteCode, attempts: number, message: string): StableResult<T> {
+    const elapsedMs = deps.now() - startedAt;
+    const activeProjectLoads = deps.getActiveProjectLoads();
+    deps.log(
+      `[lsp-mcp] incomplete code=${code} elapsedMs=${elapsedMs} attempts=${attempts} ` +
+        `activeProjectLoads=${activeProjectLoads} retryAfterMs=${deps.settleMs}`,
+    );
+    return {
+      complete: false,
+      code,
+      retryable: true,
+      retryAfterMs: deps.settleMs,
+      elapsedMs,
+      attempts,
+      activeProjectLoads,
+      message,
+    };
+  }
+
+  for (let attempt = 0; attempt < deps.maxAttempts; attempt++) {
+    // One readiness budget spans every attempt, so a retry never restarts it.
+    const waitMs = Math.max(0, deps.projectLoadTimeoutMs - (deps.now() - startedAt));
+    const settled = await deps.waitForProjectLoad(waitMs);
+    if (!settled) {
+      return incomplete(
+        "project_loading",
+        attempt + 1,
+        `project graph still loading after ${deps.projectLoadTimeoutMs}ms`,
+      );
+    }
+    const before = deps.getGeneration();
+    let value: T;
+    try {
+      value = await fn();
+    } catch (err) {
+      const message = (err as { message?: string })?.message ?? "";
+      if (!/Debug Failure/i.test(message) || attempt === deps.maxAttempts - 1) {
+        throw err;
+      }
+      await deps.resync();
+      await new Promise((r) => setTimeout(r, deps.settleRetryMs));
+      continue;
+    }
+    if (deps.getGeneration() === before) return { complete: true, value };
+  }
+  return incomplete(
+    "graph_changing",
+    deps.maxAttempts,
+    `project graph changed under ${deps.maxAttempts} consecutive attempts`,
+  );
+}
+
+export function incompletePayload(result: Extract<StableResult<unknown>, { complete: false }>) {
+  return {
+    ok: false as const,
+    complete: false as const,
+    code: result.code,
+    retryable: true as const,
+    retryAfterMs: result.retryAfterMs,
+    elapsedMs: result.elapsedMs,
+    attempts: result.attempts,
+    activeProjectLoads: result.activeProjectLoads,
+    hint:
+      `The project graph is not settled (${result.code}). Wait ${result.retryAfterMs}ms and retry. ` +
+      `After three consecutive incomplete responses, stop retrying, inspect the tsserver log, ` +
+      `and treat the result as unavailable.`,
+  };
+}
 
 /**
  * Opens one file per configured project so tsserver has loaded every project

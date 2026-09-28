@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as url from "node:url";
 import { getOrCreateClient } from "../lsp/factory.js";
+import { incompletePayload } from "../lsp/lifecycle.js";
 import { detectWorkspaceRoot } from "../workspace/detect.js";
 import { applyWorkspaceEdit, WorkspaceEdit } from "../workspace/edit-apply.js";
 import { findLingeringReferences } from "../verify/lingering-refs.js";
@@ -19,10 +20,15 @@ interface RenameFileResult {
   lingeringReferences: string[];
 }
 
+type IncompleteRenameFile = ReturnType<typeof incompletePayload> & {
+  filesChanged: string[];
+  lingeringReferences: string[];
+};
+
 async function renameFile(input: {
   oldPath: string;
   newPath: string;
-}): Promise<RenameFileResult> {
+}): Promise<RenameFileResult | IncompleteRenameFile> {
   const { oldPath, newPath } = input;
   const workspaceRoot = detectWorkspaceRoot(oldPath);
   const lifecycle = await getOrCreateClient(workspaceRoot);
@@ -33,11 +39,15 @@ async function renameFile(input: {
   // willRenameFiles — server returns edits for importers. Gated on a quiescent
   // project graph: importers in a project tsserver has not loaded yet are
   // simply absent from the edit, so their import specifiers break silently.
-  const edit = (await lifecycle.runStable(() =>
+  const stable = await lifecycle.runStable(() =>
     lifecycle.client.request("workspace/willRenameFiles", {
       files: [{ oldUri, newUri }],
     }),
-  )) as WorkspaceEdit | null;
+  );
+  if (!stable.complete) {
+    return { ...incompletePayload(stable), filesChanged: [], lingeringReferences: [] };
+  }
+  const edit = stable.value as WorkspaceEdit | null;
 
   const changed: string[] = [];
   if (edit) {
@@ -90,13 +100,16 @@ server.registerTool(
   "rename_file",
   {
     description:
-      "Rename a file and update all import specifiers via LSP workspace/willRenameFiles.",
+      "Rename a file and update import specifiers via LSP workspace/willRenameFiles." +
+        " When the project graph is not settled it refuses before editing and returns complete:false with a retryable code (project_loading or graph_changing), retryAfterMs, and filesChanged:[]." +
+        " lingeringReferences (tracked and untracked files) is an advisory text match, not a verification that every import was rewritten.",
     inputSchema: inputShape,
   },
   async (input) => {
     const result = await renameFile(input);
     return {
       content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      isError: !result.ok,
     };
   },
 );
