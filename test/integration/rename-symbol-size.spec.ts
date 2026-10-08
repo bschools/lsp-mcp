@@ -251,14 +251,13 @@ describe("rename_symbol serialized response size", () => {
 
   it("stays under the MCP output limit when the time budget interrupts classification", async () => {
     // The deadline is wall-clock and covers discovery, so the window that interrupts classification
-    // shifts with machine speed. Step the budget up until some candidates are classified and some are not.
+    // shifts with machine speed. Step the budget up until classification has produced homonyms and some candidates are still unclassified.
     let outcome: { result: RenameOutcome; chars: number } | undefined;
     for (const budgetMs of [3000, 3500, 4000, 4500]) {
       outcome = await renameIn("time_budget", tierScaleFiles(), {
         LSP_MCP_VERIFY_BUDGET_MS: String(budgetMs),
       });
-      const classified = (outcome.result.homonyms?.length ?? 0) + (outcome.result.informationalMentions?.length ?? 0);
-      if (outcome.result.verificationIncomplete?.reason === "time_budget" && classified > 0) break;
+      if (outcome.result.verificationIncomplete?.reason === "time_budget" && (outcome.result.homonyms?.length ?? 0) > 0) break;
       await client?.close();
       client = undefined;
       if (workspace) fs.rmSync(workspace, { recursive: true, force: true });
@@ -268,7 +267,7 @@ describe("rename_symbol serialized response size", () => {
 
     expect(result).toMatchObject({ ok: false, code: "rename_unverified" });
     expect(result.verificationIncomplete?.reason).toBe("time_budget");
-    expect((result.homonyms?.length ?? 0) + (result.informationalMentions?.length ?? 0)).toBeGreaterThan(0);
+    expect(result.homonyms?.length ?? 0).toBeGreaterThan(0);
     expect(result.unclassifiedCandidates?.length ?? 0).toBeGreaterThan(0);
     expect(chars).toBeLessThan(MAX_RESPONSE_CHARS);
   }, 180000);
