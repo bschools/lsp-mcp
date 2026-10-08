@@ -114,6 +114,8 @@ server.registerTool(
   {
     description:
       "Move a function to a different file via LSP codeAction (refactor.move). Experimental — fidelity varies by language backend." +
+        " Takes filePath, a 0-indexed line and column on the function, and destinationFile." +
+        " On typescript-language-server it refuses with code destination_unsupported and filesChanged:[] without changing files." +
         " When the project graph is not settled it refuses before editing and returns complete:false with a retryable code (project_loading or graph_changing), retryAfterMs, and filesChanged:[].",
     inputSchema: inputShape,
   },

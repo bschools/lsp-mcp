@@ -10,8 +10,8 @@ An MCP server that exposes LSP refactoring operations as Claude Code tools.
 | `find_references` | Find all references to a symbol across the workspace |
 | `document_symbols` | List the symbols a file declares — no position needed; optional `name` filter |
 | `rename_file` | Rename a file and update all import specifiers |
-| `extract_function` | Extract a code block into a named function (v0.2) |
-| `move_function` | Move a function to a different file (v0.2, experimental) |
+| `extract_function` | Extract a code range into a named function (refuses on `typescript-language-server`; see [Extract and move](#extract-and-move)) |
+| `move_function` | Move a function to a different file (refuses on `typescript-language-server`; see [Extract and move](#extract-and-move)) |
 
 ## Installation
 
@@ -147,21 +147,36 @@ reports the two facts separately:
 - `verified: true` (and `ok: true`) means the verification completed and no old
   name that should have been renamed was left behind.
 - `applied: true` with `verified: false` returns `code: "rename_unverified"`
-  and a `hint` naming the affected paths. The edits are already on disk, so
+  and a `hint` naming the paths in `lingeringReferences`. The edits are already on disk, so
   review or revert them before retrying.
 
 Verification tokenizes every tracked and non-ignored untracked
 TypeScript/JavaScript source and spec file in the workspace, including files
 the edit touched. Each identifier spelled like the old name is resolved against
-the post-edit graph, and the result lists it in one bucket:
+the post-edit graph, and the result lists it in one bucket. Only
+`confirmedResiduals` lists each occurrence; the other buckets list one entry
+per file:
 
 | Field | Meaning | Affects `verified` |
 |-------|---------|--------------------|
 | `confirmedResiduals` | The old name no longer binds: a fresh diagnostic at that position reports an unbound name, missing export, or missing typed member | Yes, fails |
-| `unclassifiedCandidates` | Classification could not finish, for example when diagnostics never arrived or a budget ran out | Yes, fails |
-| `homonyms` | A different declaration that shares the name, including untyped JavaScript object keys | No |
-| `informationalMentions` | Strings, templates, comments (`kind` of `string`, `template`, or `comment`), and untyped member accesses such as `(x as any).oldName` (`kind: "untyped"`) | No |
-| `lingeringReferences` | The raw text-match path list, with edited files excluded. Kept for existing callers | No |
+| `unclassifiedCandidates` | `{path, count}` per file. Classification could not finish, for example when diagnostics never arrived or a budget ran out | Yes, fails |
+| `homonyms` | `{path, count, kinds}` per file. A different declaration that shares the name, including untyped object-literal and matcher keys | No |
+| `informationalMentions` | `{path, count, kinds}` per file. Strings, templates, comments (`string`, `template`, `comment`), and untyped member accesses such as `(x as any).oldName` (`untyped`) | No |
+| `lingeringReferences` | The sorted unique paths of `confirmedResiduals` and `unclassifiedCandidates` | No |
+
+Grouping makes the response grow with the number of files rather than the
+number of occurrences. It is not a size bound: a large enough workspace can
+still produce a response over a client's output limit.
+
+Untyped object-literal and matcher keys that name the old property, including
+`expect.objectContaining` keys in a spec the rename does not edit, classify as
+homonyms. They are not detected as residuals, so `verified: true` does not
+cover them.
+
+An empty `lingeringReferences` does not mean no old-name text remains.
+`homonyms` and `informationalMentions` are excluded from it, so grep for the
+old name after the rename.
 
 An old-named alias to the renamed declaration, such as
 `import { newName as oldName }`, is correct and is not listed.
@@ -176,6 +191,20 @@ never reported as verified.
 `rename_file` does not verify semantically. Its `lingeringReferences`, which
 includes untracked files, is an advisory text match, and `ok: true` does not
 mean every import was rewritten.
+
+## Extract and move
+
+`extract_function` takes `filePath`, a 0-indexed range (`startLine`,
+`startColumn`, `endLine`, `endColumn`), and `newName`. `move_function` takes
+`filePath`, a 0-indexed `line` and `column` on the function, and
+`destinationFile`. A file reference alone does not identify an extractable
+block: the caller must supply the range.
+
+On `typescript-language-server` both tools refuse without changing any file:
+`extract_function` returns `code: "command_execution_unsupported"` and
+`move_function` returns `code: "destination_unsupported"`, each with
+`filesChanged: []`. PersonaMind's v3 `RequiredTool` therefore cannot require
+either tool with this backend yet.
 
 ## Parameter indexing
 

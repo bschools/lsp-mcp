@@ -157,7 +157,10 @@ server.registerTool(
   "extract_function",
   {
     description:
-      "Extract a code range into a new function via LSP codeAction (refactor.extract). Experimental.",
+      "Extract a code range into a new function via LSP codeAction (refactor.extract). Experimental. " +
+      "Takes filePath, a 0-indexed range (startLine, startColumn, endLine, endColumn), and newName; " +
+      "a file reference alone does not identify an extractable block. " +
+      "On typescript-language-server it refuses with code command_execution_unsupported and filesChanged:[] without changing files.",
     inputSchema: inputShape,
   },
   async (input) => {
