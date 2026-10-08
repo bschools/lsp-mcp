@@ -151,7 +151,8 @@ describe("rename_symbol integration", () => {
 
 type Position = { path: string; line: number; character: number };
 type Classified = Position & { kind: string };
-type Mention = { path: string; line: number; kind: string };
+type FileCount = { path: string; count: number };
+type FileKinds = FileCount & { kinds: string[] };
 
 type RenameOutcome = {
   ok: boolean;
@@ -161,9 +162,9 @@ type RenameOutcome = {
   filesChanged: string[];
   verificationIncomplete?: { reason: string; candidateCount?: number; maxCandidates?: number };
   confirmedResiduals?: Classified[];
-  unclassifiedCandidates?: Position[];
-  homonyms?: Classified[];
-  informationalMentions?: Mention[];
+  unclassifiedCandidates?: FileCount[];
+  homonyms?: FileKinds[];
+  informationalMentions?: FileKinds[];
   lingeringReferences: string[];
 };
 
@@ -291,8 +292,8 @@ describe("rename_symbol semantic verification", () => {
     expect(result).toMatchObject({ ok: false, verified: false, code: "rename_unverified" });
     expect(result.verificationIncomplete).toBeUndefined();
     expect(pathsOf(result.confirmedResiduals)).toEqual([abs("src/consumer.ts")]);
-    // The raw text-match list skips edited files, so it cannot see this residual.
-    expect(result.lingeringReferences).toEqual([]);
+    // lingeringReferences lists the files holding residuals, edited files included.
+    expect(result.lingeringReferences).toEqual([abs("src/consumer.ts")]);
   }, 60000);
 
   it("reports an untracked spec consumer outside the tsconfig include set as a confirmed residual", async () => {
@@ -343,17 +344,18 @@ describe("rename_symbol semantic verification", () => {
     expect(result.confirmedResiduals).toEqual([]);
     expect(result.unclassifiedCandidates).toEqual([]);
     // The JS object key is its own declaration with no unbound-name diagnostic.
-    expect(new Set(pathsOf(result.homonyms))).toEqual(new Set([abs("src/other.ts"), abs("src/legacy.js")]));
+    expect(result.homonyms).toEqual([
+      { path: abs("src/legacy.js"), count: 1, kinds: ["homonym"] },
+      { path: abs("src/other.ts"), count: 1, kinds: ["homonym"] },
+    ]);
     expect(result.informationalMentions).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ path: abs("src/labels.ts"), kind: "string" }),
-        expect.objectContaining({ path: abs("src/dynamic.ts"), kind: "untyped" }),
+        { path: abs("src/labels.ts"), count: 1, kinds: ["string"] },
+        { path: abs("src/dynamic.ts"), count: 1, kinds: ["untyped"] },
       ]),
     );
-    // Raw text matches list every file, alias included; they do not decide verified.
-    expect(new Set(result.lingeringReferences)).toEqual(
-      new Set(["src/alias.ts", "src/other.ts", "src/labels.ts", "src/dynamic.ts", "src/legacy.js"].map(abs)),
-    );
+    // lingeringReferences lists only residual and unclassified files; none remain here.
+    expect(result.lingeringReferences).toEqual([]);
   }, 60000);
 
   it("classifies several hundred candidates across many files within the time budget", async () => {
@@ -362,8 +364,9 @@ describe("rename_symbol semantic verification", () => {
 
     expect(result).toMatchObject({ ok: true, verified: true });
     expect(result.verificationIncomplete).toBeUndefined();
-    expect(result.homonyms?.length).toBe(40 * 11);
-    expect(result.lingeringReferences).toHaveLength(40);
+    expect(result.homonyms).toHaveLength(40);
+    for (const entry of result.homonyms ?? []) expect(entry).toMatchObject({ count: 11, kinds: ["homonym"] });
+    expect(result.lingeringReferences).toEqual([]);
     expect(Date.now() - startedAt).toBeLessThan(60000);
   }, 90000);
 
@@ -380,8 +383,9 @@ describe("rename_symbol semantic verification", () => {
       verificationIncomplete: { reason: "candidate_budget", candidateCount: 55, maxCandidates: 20 },
     });
     expect(result.homonyms).toEqual([]);
-    expect(result.unclassifiedCandidates).toHaveLength(55);
-    expect(result.lingeringReferences).toHaveLength(5);
+    expect(result.unclassifiedCandidates).toHaveLength(5);
+    expect((result.unclassifiedCandidates ?? []).reduce((sum, f) => sum + f.count, 0)).toBe(55);
+    expect(result.lingeringReferences).toEqual(pathsOf(result.unclassifiedCandidates));
   }, 60000);
 
   it("returns time_budget when discovery exhausts the whole-pass budget", async () => {

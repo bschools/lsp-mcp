@@ -196,7 +196,7 @@ describe("rename_file integration", () => {
   }, 60000);
 });
 
-// ── Bundler-resolution suite (mirrors PersonaMind: ESNext + moduleResolution:bundler) ──
+// ── Bundler-resolution suite (mirrors a typical monorepo: ESNext + moduleResolution:bundler) ──
 
 const BUNDLER_FIXTURE_SRC = path.resolve(__dirname, "../fixtures/ts-bundler");
 

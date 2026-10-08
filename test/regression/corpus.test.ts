@@ -8,7 +8,7 @@ import { spawn, ChildProcessWithoutNullStreams } from "node:child_process";
  * Regression corpus — Phase 4 cutover gate.
  *
  * Asserts parity between the old fork (`/home/benmar/lsp-mcp/dist/index.js`)
- * and the new clean-room server across historical PersonaMind rename targets.
+ * and the new clean-room server across historical real-world rename targets.
  *
  * SKIP RULES:
  * - If OLD_LSP_MCP env var is unset → skip (corpus only runs when both servers
@@ -17,7 +17,6 @@ import { spawn, ChildProcessWithoutNullStreams } from "node:child_process";
  *
  * Parity required on:
  * - filesChanged (same set of absolute paths, modulo ordering)
- * - lingeringReferences (new server may be stricter, but never looser)
  */
 
 const OLD_LSP_MCP = process.env.OLD_LSP_MCP;
@@ -37,7 +36,7 @@ interface RenameCase {
   newName: string;
 }
 
-// PersonaMind rename targets — class, method, type alias, and function mix.
+// Real-world rename targets — class, method, type alias, and function mix.
 // At least two entries have spec-file consumers (UserService, AuthService).
 const CORPUS: RenameCase[] = [
   // --- user.service.ts (has spec + consumer) ---
@@ -136,7 +135,6 @@ const CORPUS: RenameCase[] = [
 interface ToolResult {
   ok: boolean;
   filesChanged: string[];
-  lingeringReferences: string[];
 }
 
 class McpClient {
@@ -233,9 +231,6 @@ async function runRename(
     return {
       ok: parsed.ok,
       filesChanged: parsed.filesChanged.map((p) => path.relative(ws, p)).sort(),
-      lingeringReferences: parsed.lingeringReferences
-        .map((p) => path.relative(ws, p))
-        .sort(),
     };
   } finally {
     await client.close();
@@ -250,11 +245,6 @@ describe.skipIf(shouldSkip)("Phase 4 regression corpus", () => {
 
     expect(newResult.ok).toBe(oldResult.ok);
     expect(newResult.filesChanged).toEqual(oldResult.filesChanged);
-    // New server may flag more lingering refs (stricter verification is OK,
-    // looser is not). Assert: new is a superset of old.
-    for (const ref of oldResult.lingeringReferences) {
-      expect(newResult.lingeringReferences).toContain(ref);
-    }
   }, 60000);
 });
 

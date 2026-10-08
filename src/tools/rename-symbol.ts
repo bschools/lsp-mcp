@@ -5,7 +5,6 @@ import { incompletePayload, numberEnv, type Diagnostic, type LspLifecycle } from
 import { detectWorkspaceRoot } from "../workspace/detect.js";
 import { applyWorkspaceEdit, TextEdit, WorkspaceEdit } from "../workspace/edit-apply.js";
 import {
-  findLingeringReferences,
   findResidualCandidates,
   ResidualDiscoveryDeadlineExceeded,
   type IdentifierCandidate,
@@ -21,6 +20,12 @@ import {
   type VerifyDeps,
   type VerifyIncomplete,
 } from "../verify/residual-classify.js";
+import {
+  groupCandidatesByFile,
+  groupKindsByFile,
+  type FileCount,
+  type FileKinds,
+} from "../verify/group-by-file.js";
 import { server } from "../server.js";
 import * as path from "node:path";
 import * as url from "node:url";
@@ -32,8 +37,6 @@ const inputShape = {
   newName: z.string().min(1).describe("New symbol name"),
 };
 
-type UntypedMention = IdentifierCandidate & { kind: "untyped" };
-
 type RenameResult = {
   ok: boolean;
   applied?: boolean;
@@ -41,9 +44,9 @@ type RenameResult = {
   verified?: boolean;
   verificationIncomplete?: VerifyIncomplete;
   confirmedResiduals?: ClassifiedCandidate[];
-  unclassifiedCandidates?: IdentifierCandidate[];
-  homonyms?: ClassifiedCandidate[];
-  informationalMentions?: Array<InformationalMention | UntypedMention>;
+  unclassifiedCandidates?: FileCount[];
+  homonyms?: Array<FileKinds<"homonym">>;
+  informationalMentions?: Array<FileKinds<InformationalMention["kind"] | "untyped">>;
   lingeringReferences: string[];
   oldName?: string;
   retried?: boolean;
@@ -209,18 +212,10 @@ async function renameSymbol(input: {
   const budgetMs = numberEnv("LSP_MCP_VERIFY_BUDGET_MS", VERIFY_BUDGET_MS);
   const maxCandidates = numberEnv("LSP_MCP_VERIFY_MAX_CANDIDATES", VERIFY_MAX_CANDIDATES);
   const deadlineMs = verificationStartedAt + budgetMs;
-  let lingeringReferences: string[] = [];
   let identifierCandidates: IdentifierCandidate[] = [];
   let informationalMentions: InformationalMention[] = [];
   let verification: Awaited<ReturnType<typeof verifyResidualCandidates>>;
   try {
-    // Raw text matches are advisory; the same deadline covers both discovery passes.
-    lingeringReferences = findLingeringReferences({
-      workspaceRoot,
-      oldName,
-      excludePaths: filesChanged,
-      deadlineMs,
-    });
     ({ identifierCandidates, informationalMentions } = findResidualCandidates({
       workspaceRoot,
       oldName,
@@ -241,9 +236,9 @@ async function renameSymbol(input: {
       ...(timedOut && {
         verificationIncomplete: { reason: "time_budget" as const, elapsedMs: Date.now() - verificationStartedAt },
       }),
-      unclassifiedCandidates: identifierCandidates,
-      informationalMentions,
-      lingeringReferences,
+      unclassifiedCandidates: groupCandidatesByFile(identifierCandidates),
+      informationalMentions: groupKindsByFile(informationalMentions),
+      lingeringReferences: pathsOf(identifierCandidates),
       code: "rename_unverified",
       hint: timedOut
         ? `Verification discovery exceeded its ${budgetMs}ms time budget; undiscovered candidates are unknown. ` +
@@ -253,32 +248,24 @@ async function renameSymbol(input: {
     };
   }
 
-  const position0 = (c: ClassifiedCandidate): IdentifierCandidate => ({
-    path: c.path,
-    line: c.line,
-    character: c.character,
-  });
-  const ofKind = (kind: ClassifiedCandidate["kind"]) =>
-    verification.classified.filter((c) => c.kind === kind);
+  const ofKind = <K extends ClassifiedCandidate["kind"]>(kind: K) =>
+    verification.classified.filter((c): c is ClassifiedCandidate & { kind: K } => c.kind === kind);
   const confirmedResiduals = ofKind("unresolved");
-  const unclassifiedCandidates = ofKind("unclassifiable").map(position0);
+  const unclassified = ofKind("unclassifiable");
+  const lingeringReferences = pathsOf([...confirmedResiduals, ...unclassified]);
   const result: RenameResult = {
     ...applied,
     ok: verification.verified,
     verified: verification.verified,
     verificationIncomplete: verification.incomplete,
     confirmedResiduals,
-    unclassifiedCandidates,
-    homonyms: ofKind("homonym"),
-    informationalMentions: [
-      ...informationalMentions,
-      ...ofKind("untyped").map((c) => ({ ...position0(c), kind: "untyped" as const })),
-    ],
+    unclassifiedCandidates: groupCandidatesByFile(unclassified),
+    homonyms: groupKindsByFile(ofKind("homonym")),
+    informationalMentions: groupKindsByFile([...informationalMentions, ...ofKind("untyped")]),
     lingeringReferences,
   };
   if (verification.verified) return result;
 
-  const affected = [...new Set([...confirmedResiduals, ...unclassifiedCandidates].map((c) => c.path))];
   const incomplete = verification.incomplete;
   const reason = incomplete
     ? `Verification was not completed (${incomplete.reason}) rather than failed; ` +
@@ -289,9 +276,14 @@ async function renameSymbol(input: {
     code: "rename_unverified",
     hint:
       reason +
-      `Residual or unclassified references to "${oldName}" remain in: ${affected.join(", ")}. ` +
+      `Residual or unclassified references to "${oldName}" remain in: ${lingeringReferences.join(", ")}. ` +
       `The edits in filesChanged are already on disk; review or revert them before retrying.`,
   };
+}
+
+/** Sorted unique paths of the files holding residual or unclassified candidates. */
+function pathsOf(candidates: ReadonlyArray<{ path: string }>): string[] {
+  return [...new Set(candidates.map((c) => c.path))].sort();
 }
 
 /** The renamed declaration's position after the edit, from the edit at the original position. */
@@ -412,7 +404,12 @@ server.registerTool(
       "the old name no longer resolves anywhere (bounded by LSP_MCP_VERIFY_BUDGET_MS / LSP_MCP_VERIFY_MAX_CANDIDATES). " +
       "applied:true with verified:false (code rename_unverified) means the edits are on disk but confirmedResiduals or " +
       "unclassifiedCandidates remain, or verificationIncomplete names the budget or readiness reason. " +
-      "homonyms, informationalMentions, and the raw lingeringReferences list do not affect verified." +
+      "confirmedResiduals lists each occurrence; unclassifiedCandidates is {path, count} per file, and homonyms and " +
+      "informationalMentions are {path, count, kinds} per file; neither of the latter two affects verified. " +
+      "lingeringReferences is the sorted unique paths of confirmedResiduals and unclassifiedCandidates. " +
+      "Untyped object-literal and matcher keys naming the old property (including expect.objectContaining keys) classify " +
+      "as homonyms and are not detected, so verified:true does not cover them. An empty lingeringReferences does not mean " +
+      "no old-name text remains: grep for the old name after the rename." +
       " When the project graph is not settled it refuses before editing and returns complete:false with a retryable code (project_loading or graph_changing), retryAfterMs, and filesChanged:[].",
     inputSchema: inputShape,
   },
@@ -420,7 +417,7 @@ server.registerTool(
     try {
       const result = await renameSymbol(input);
       return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        content: [{ type: "text", text: JSON.stringify(result) }],
         isError: !result.ok,
       };
     } catch (err) {
