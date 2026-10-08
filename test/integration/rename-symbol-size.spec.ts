@@ -251,13 +251,14 @@ describe("rename_symbol serialized response size", () => {
 
   it("stays under the MCP output limit when the time budget interrupts classification", async () => {
     // The deadline is wall-clock and covers discovery, so the window that interrupts classification
-    // shifts with machine speed. Step the budget up until classification has produced homonyms and some candidates are still unclassified.
+    // shifts with machine speed. Step the budget (smaller first, for fast machines) until classification has produced homonyms and some candidates are still unclassified.
     let outcome: { result: RenameOutcome; chars: number } | undefined;
-    for (const budgetMs of [3000, 3500, 4000, 4500]) {
+    for (const budgetMs of [3000, 2500, 2000, 1500, 3500, 4000, 4500]) {
       outcome = await renameIn("time_budget", tierScaleFiles(), {
         LSP_MCP_VERIFY_BUDGET_MS: String(budgetMs),
       });
-      if (outcome.result.verificationIncomplete?.reason === "time_budget" && (outcome.result.homonyms?.length ?? 0) > 0) break;
+      const { verificationIncomplete, homonyms, unclassifiedCandidates } = outcome.result;
+      if (verificationIncomplete?.reason === "time_budget" && homonyms?.length && unclassifiedCandidates?.length) break;
       await client?.close();
       client = undefined;
       if (workspace) fs.rmSync(workspace, { recursive: true, force: true });
