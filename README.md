@@ -203,8 +203,8 @@ block: the caller must supply the range.
 On `typescript-language-server` both tools refuse without changing any file:
 `extract_function` returns `code: "command_execution_unsupported"` and
 `move_function` returns `code: "destination_unsupported"`, each with
-`filesChanged: []`. PersonaMind's v3 `RequiredTool` therefore cannot require
-either tool with this backend yet.
+`filesChanged: []`. Callers therefore cannot rely on either tool with this
+backend yet.
 
 ## Parameter indexing
 

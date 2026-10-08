@@ -67,8 +67,8 @@ const MCP_OUTPUT_TOKEN_LIMIT = 25_000;
 const CHARS_PER_TOKEN = 3;
 const MAX_RESPONSE_CHARS = MCP_OUTPUT_TOKEN_LIMIT * CHARS_PER_TOKEN;
 
-/** Nested directory that pads absolute paths to PersonaMind-like lengths. */
-const PAD_DIR = "libs/feature-packages/personamind-like-nested-module-directory";
+/** Nested directory that pads absolute paths to realistic monorepo lengths. */
+const PAD_DIR = "libs/feature-packages/monorepo-style-deeply-nested-module-dirs";
 const MIN_PATH_LENGTH = 70;
 
 type FileCount = { path: string; count: number };
