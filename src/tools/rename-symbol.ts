@@ -417,7 +417,7 @@ server.registerTool(
     try {
       const result = await renameSymbol(input);
       return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        content: [{ type: "text", text: JSON.stringify(result) }],
         isError: !result.ok,
       };
     } catch (err) {
