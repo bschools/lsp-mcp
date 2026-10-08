@@ -8,7 +8,7 @@ import { spawn, ChildProcessWithoutNullStreams } from "node:child_process";
  * Regression corpus — Phase 4 cutover gate.
  *
  * Asserts parity between the old fork (`/home/benmar/lsp-mcp/dist/index.js`)
- * and the new clean-room server across historical PersonaMind rename targets.
+ * and the new clean-room server across historical real-world rename targets.
  *
  * SKIP RULES:
  * - If OLD_LSP_MCP env var is unset → skip (corpus only runs when both servers
@@ -36,7 +36,7 @@ interface RenameCase {
   newName: string;
 }
 
-// PersonaMind rename targets — class, method, type alias, and function mix.
+// Real-world rename targets — class, method, type alias, and function mix.
 // At least two entries have spec-file consumers (UserService, AuthService).
 const CORPUS: RenameCase[] = [
   // --- user.service.ts (has spec + consumer) ---
