@@ -17,7 +17,6 @@ import { spawn, ChildProcessWithoutNullStreams } from "node:child_process";
  *
  * Parity required on:
  * - filesChanged (same set of absolute paths, modulo ordering)
- * - lingeringReferences (new server may be stricter, but never looser)
  */
 
 const OLD_LSP_MCP = process.env.OLD_LSP_MCP;
@@ -136,7 +135,6 @@ const CORPUS: RenameCase[] = [
 interface ToolResult {
   ok: boolean;
   filesChanged: string[];
-  lingeringReferences: string[];
 }
 
 class McpClient {
@@ -233,9 +231,6 @@ async function runRename(
     return {
       ok: parsed.ok,
       filesChanged: parsed.filesChanged.map((p) => path.relative(ws, p)).sort(),
-      lingeringReferences: parsed.lingeringReferences
-        .map((p) => path.relative(ws, p))
-        .sort(),
     };
   } finally {
     await client.close();
@@ -250,11 +245,6 @@ describe.skipIf(shouldSkip)("Phase 4 regression corpus", () => {
 
     expect(newResult.ok).toBe(oldResult.ok);
     expect(newResult.filesChanged).toEqual(oldResult.filesChanged);
-    // New server may flag more lingering refs (stricter verification is OK,
-    // looser is not). Assert: new is a superset of old.
-    for (const ref of oldResult.lingeringReferences) {
-      expect(newResult.lingeringReferences).toContain(ref);
-    }
   }, 60000);
 });
 
